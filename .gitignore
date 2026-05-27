@@ -3,6 +3,10 @@
 *.zip
 venv*/
 envs/
+.conda/
+.cuda/
+.tmp/
+.triton-cache/
 slurm_logs/
 
 sync1.sh
