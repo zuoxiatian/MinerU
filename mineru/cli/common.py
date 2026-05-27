@@ -390,17 +390,25 @@ async def _async_process_vlm(
         **kwargs,
 ):
     """异步处理VLM后端逻辑"""
-    parse_method = "vlm"
+    vlm_text_source = kwargs.pop("vlm_text_source", None)
+    use_fusion = (
+        str(vlm_text_source or "").lower() == "fusion"
+        or os.getenv("MINERU_VLM_TEXT_SOURCE", "").lower() == "fusion"
+    )
+    parse_method = "vlm_fusion" if use_fusion else "vlm"
     f_draw_span_bbox = False
     if not backend.endswith("client"):
         server_url = None
+    analyze_func = aio_vlm_doc_analyze
+    if use_fusion:
+        from mineru.backend.vlm_fusion.analyze import aio_doc_analyze as analyze_func
 
     for idx, pdf_bytes in enumerate(pdf_bytes_list):
         pdf_file_name = pdf_file_names[idx]
         local_image_dir, local_md_dir = prepare_env(output_dir, pdf_file_name, parse_method)
         image_writer, md_writer = FileBasedDataWriter(local_image_dir), FileBasedDataWriter(local_md_dir)
 
-        middle_json, infer_result = await aio_vlm_doc_analyze(
+        middle_json, infer_result = await analyze_func(
             pdf_bytes, image_writer=image_writer, backend=backend, server_url=server_url, **kwargs,
         )
 
@@ -431,17 +439,25 @@ def _process_vlm(
         **kwargs,
 ):
     """同步处理VLM后端逻辑"""
-    parse_method = "vlm"
+    vlm_text_source = kwargs.pop("vlm_text_source", None)
+    use_fusion = (
+        str(vlm_text_source or "").lower() == "fusion"
+        or os.getenv("MINERU_VLM_TEXT_SOURCE", "").lower() == "fusion"
+    )
+    parse_method = "vlm_fusion" if use_fusion else "vlm"
     f_draw_span_bbox = False
     if not backend.endswith("client"):
         server_url = None
+    analyze_func = vlm_doc_analyze
+    if use_fusion:
+        from mineru.backend.vlm_fusion.analyze import doc_analyze as analyze_func
 
     for idx, pdf_bytes in enumerate(pdf_bytes_list):
         pdf_file_name = pdf_file_names[idx]
         local_image_dir, local_md_dir = prepare_env(output_dir, pdf_file_name, parse_method)
         image_writer, md_writer = FileBasedDataWriter(local_image_dir), FileBasedDataWriter(local_md_dir)
 
-        middle_json, infer_result = vlm_doc_analyze(
+        middle_json, infer_result = analyze_func(
             pdf_bytes, image_writer=image_writer, backend=backend, server_url=server_url, **kwargs,
         )
 
@@ -670,6 +686,10 @@ def do_parse(
             f_dump_model_output, f_dump_orig_pdf, f_dump_content_list, f_make_md_mode
         )
     else:
+        vlm_text_source = kwargs.pop("vlm_text_source", None)
+        if backend.startswith("vlm-fusion-"):
+            vlm_text_source = "fusion"
+            backend = "vlm-" + backend[len("vlm-fusion-"):]
         if backend.startswith("vlm-"):
             backend = backend[4:]
 
@@ -686,7 +706,7 @@ def do_parse(
                 output_dir, pdf_file_names, pdf_bytes_list, backend,
                 f_draw_layout_bbox, f_draw_span_bbox, f_dump_md, f_dump_middle_json,
                 f_dump_model_output, f_dump_orig_pdf, f_dump_content_list, f_make_md_mode,
-                server_url, image_analysis=image_analysis, **kwargs,
+                server_url, image_analysis=image_analysis, vlm_text_source=vlm_text_source, **kwargs,
             )
         elif backend.startswith("hybrid-"):
             ensure_backend_dependencies(backend)
@@ -766,6 +786,10 @@ async def aio_do_parse(
             f_dump_model_output, f_dump_orig_pdf, f_dump_content_list, f_make_md_mode
         )
     else:
+        vlm_text_source = kwargs.pop("vlm_text_source", None)
+        if backend.startswith("vlm-fusion-"):
+            vlm_text_source = "fusion"
+            backend = "vlm-" + backend[len("vlm-fusion-"):]
         if backend.startswith("vlm-"):
             backend = backend[4:]
 
@@ -782,7 +806,7 @@ async def aio_do_parse(
                 output_dir, pdf_file_names, pdf_bytes_list, backend,
                 f_draw_layout_bbox, f_draw_span_bbox, f_dump_md, f_dump_middle_json,
                 f_dump_model_output, f_dump_orig_pdf, f_dump_content_list, f_make_md_mode,
-                server_url, image_analysis=image_analysis, **kwargs,
+                server_url, image_analysis=image_analysis, vlm_text_source=vlm_text_source, **kwargs,
             )
         elif backend.startswith("hybrid-"):
             ensure_backend_dependencies(backend)

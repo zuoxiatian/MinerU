@@ -4,6 +4,7 @@ from pathlib import Path
 
 OFFICE_PARSE_DIR_NAME = "office"
 VLM_PARSE_DIR_NAME = "vlm"
+VLM_FUSION_PARSE_DIR_NAME = "vlm_fusion"
 
 
 def build_parse_dir(
@@ -19,6 +20,8 @@ def build_parse_dir(
         return output_root / pdf_name / OFFICE_PARSE_DIR_NAME
     if backend.startswith("pipeline"):
         return output_root / pdf_name / parse_method
+    if backend.startswith("vlm-fusion") or parse_method == VLM_FUSION_PARSE_DIR_NAME:
+        return output_root / pdf_name / VLM_FUSION_PARSE_DIR_NAME
     if backend.startswith("vlm"):
         return output_root / pdf_name / VLM_PARSE_DIR_NAME
     if backend.startswith("hybrid"):

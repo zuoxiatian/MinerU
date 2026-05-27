@@ -89,6 +89,7 @@ async def parse_request_form(
             description="""The backend for parsing:
 - pipeline: More general, supports multiple languages, hallucination-free.
 - vlm-auto-engine: High accuracy via local computing power, supports Chinese and English documents only.
+- vlm-fusion-auto-engine: Experimental layout-first VLM fusion, locks reliable PDF text and supplements visual text.
 - vlm-http-client: High accuracy via remote computing power(client suitable for openai-compatible servers), supports Chinese and English documents only.
 - hybrid-auto-engine: Next-generation high accuracy solution via local computing power, supports multiple languages.
 - hybrid-http-client: High accuracy via remote computing power but requires a little local computing power(client suitable for openai-compatible servers), supports multiple languages.""",

@@ -1,0 +1,72 @@
+# Copyright (c) Opendatalab. All rights reserved.
+from dataclasses import dataclass, field
+from typing import Any
+
+
+BBox = list[float]
+
+
+@dataclass
+class NativeSpan:
+    bbox: BBox
+    content: str
+    consumed: bool = False
+
+
+@dataclass
+class NativeMatch:
+    spans: list[NativeSpan]
+    content: str
+    quality: float
+    reliable: bool
+
+
+@dataclass
+class VisualTextCandidate:
+    bbox: BBox
+    content: str
+    block_type: str
+    source: str
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class PageFusionContext:
+    page_index: int
+    page_width: int
+    page_height: int
+    layout_blocks: list[dict]
+    vlm_blocks: list[dict]
+    native_spans: list[NativeSpan]
+    visual_candidates: list[VisualTextCandidate]
+
+
+@dataclass
+class FusionMetrics:
+    page_idx: int
+    layout_block_count: int = 0
+    native_span_count: int = 0
+    vlm_content_block_count: int = 0
+    visual_text_candidate_count: int = 0
+    native_consumed_count: int = 0
+    native_recovered_count: int = 0
+    native_locked_count: int = 0
+    visual_supplement_count: int = 0
+    visual_duplicate_skipped_count: int = 0
+    source_conflict_count: int = 0
+
+    def to_dict(self) -> dict:
+        return {
+            "page_idx": self.page_idx,
+            "layout_block_count": self.layout_block_count,
+            "native_span_count": self.native_span_count,
+            "vlm_content_block_count": self.vlm_content_block_count,
+            "visual_text_candidate_count": self.visual_text_candidate_count,
+            "native_consumed_count": self.native_consumed_count,
+            "native_recovered_count": self.native_recovered_count,
+            "native_locked_count": self.native_locked_count,
+            "visual_supplement_count": self.visual_supplement_count,
+            "visual_duplicate_skipped_count": self.visual_duplicate_skipped_count,
+            "source_conflict_count": self.source_conflict_count,
+        }
+

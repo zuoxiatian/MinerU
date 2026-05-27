@@ -226,6 +226,7 @@ STATUS_QUEUED_LOCALLY_PREFIX = "Queued locally:"
 BACKEND_CHOICE_DEFINITIONS = [
     "pipeline",
     "vlm-auto-engine",
+    "vlm-fusion-auto-engine",
     "hybrid-auto-engine",
 ]
 HTTP_CLIENT_BACKEND_CHOICE_DEFINITIONS = [
@@ -1498,6 +1499,7 @@ def main(ctx,
             "backend_label_hybrid": "Hybrid (Recommended)",
             "backend_label_pipeline": "Pipeline (Stable multilingual)",
             "backend_label_vlm": "VLM (High-precision Chinese/English)",
+            "backend_label_vlm_fusion": "VLM Fusion (Experimental)",
             "backend_label_remote_vlm": "Remote VLM",
             "backend_label_remote_hybrid": "Remote Hybrid",
             "server_url": "Server URL",
@@ -1545,6 +1547,7 @@ def main(ctx,
             "office_preview_ignore_once": "Dismiss",
             "office_preview_ignore_forever": "Always dismiss",
             "backend_info_vlm": "High-precision parsing via VLM, supports Chinese and English documents only.",
+            "backend_info_vlm_fusion": "Experimental layout-first VLM fusion: preserves reliable PDF text and supplements visual text.",
             "backend_info_pipeline": "Traditional Multi-model pipeline parsing, supports multiple languages, hallucination-free.",
             "backend_info_hybrid": "High-precision hybrid parsing, supports multiple languages.",
             "backend_info_default": "Select the backend engine for document parsing.",
@@ -1565,6 +1568,7 @@ def main(ctx,
             "backend_label_hybrid": "Hybrid 推荐",
             "backend_label_pipeline": "Pipeline 稳定多语言",
             "backend_label_vlm": "VLM 高精度中英文",
+            "backend_label_vlm_fusion": "VLM Fusion 实验版",
             "backend_label_remote_vlm": "Remote VLM",
             "backend_label_remote_hybrid": "Remote Hybrid",
             "server_url": "服务器地址",
@@ -1612,6 +1616,7 @@ def main(ctx,
             "office_preview_ignore_once": "忽略",
             "office_preview_ignore_forever": "不再提示",
             "backend_info_vlm": "多模态大模型高精度解析，仅支持中英文文档。",
+            "backend_info_vlm_fusion": "实验版布局优先 VLM 融合：锁定可靠 PDF 原生文本，并补充视觉文字。",
             "backend_info_pipeline": "传统多模型管道解析，支持多语言，无幻觉。",
             "backend_info_hybrid": "高精度混合解析，支持多语言。",
             "backend_info_default": "选择文档解析的后端引擎。",
@@ -1640,6 +1645,8 @@ def main(ctx,
             return ""
 
     def get_backend_info(backend_choice):
+        if backend_choice.startswith("vlm-fusion"):
+            return i18n("backend_info_vlm_fusion")
         if backend_choice.startswith("vlm"):
             return i18n("backend_info_vlm")
         elif backend_choice == "pipeline":
