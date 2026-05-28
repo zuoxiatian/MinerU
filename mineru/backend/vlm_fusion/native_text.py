@@ -7,7 +7,7 @@ from difflib import SequenceMatcher
 from loguru import logger
 
 from mineru.backend.vlm_fusion.bbox import center_in_bbox, intersection_area, reading_order_key
-from mineru.backend.vlm_fusion.schemas import BBox, NativeMatch, NativeSpan
+from mineru.backend.vlm_fusion.schemas import BBox, NativeGap, NativeMatch, NativeSpan
 from mineru.utils.pdf_text_tool import get_lines_from_chars, get_page_chars
 
 
@@ -54,6 +54,7 @@ def extract_native_spans(pdf_page) -> list[NativeSpan]:
         return []
 
     native_spans: list[NativeSpan] = []
+    next_uid = 0
     for line in lines:
         line_bbox = _coerce_bbox(line.get("bbox"))
         spans = line.get("spans") or []
@@ -62,12 +63,14 @@ def extract_native_spans(pdf_page) -> list[NativeSpan]:
             bbox = _coerce_bbox(span.get("bbox")) or line_bbox
             content = span.get("text") or span.get("content") or ""
             if bbox and str(content).strip():
-                native_spans.append(NativeSpan(bbox=bbox, content=str(content)))
+                native_spans.append(NativeSpan(bbox=bbox, content=str(content), uid=next_uid))
+                next_uid += 1
                 added_span = True
         if not added_span and line_bbox:
             content = _line_text(line)
             if content.strip():
-                native_spans.append(NativeSpan(bbox=line_bbox, content=content))
+                native_spans.append(NativeSpan(bbox=line_bbox, content=content, uid=next_uid))
+                next_uid += 1
     return native_spans
 
 
@@ -116,6 +119,50 @@ def join_native_spans(spans: list[NativeSpan]) -> str:
     return "\n".join(text for text in line_texts if text)
 
 
+def group_native_spans_to_lines(spans: list[NativeSpan]) -> list[list[NativeSpan]]:
+    if not spans:
+        return []
+    sorted_spans = sorted(spans, key=lambda span: reading_order_key({"bbox": span.bbox}))
+    lines: list[list[NativeSpan]] = []
+    for span in sorted_spans:
+        if not lines:
+            lines.append([span])
+            continue
+        prev = lines[-1][-1]
+        prev_h = max(1.0, prev.bbox[3] - prev.bbox[1])
+        if abs(span.bbox[1] - prev.bbox[1]) <= prev_h * 0.6:
+            lines[-1].append(span)
+        else:
+            lines.append([span])
+    for line in lines:
+        line.sort(key=lambda span: span.bbox[0])
+    return lines
+
+
+def join_native_spans_with_gaps(spans: list[NativeSpan], gaps: list[NativeGap]) -> str:
+    if not spans:
+        return ""
+    gaps_by_left_uid: dict[int, list[NativeGap]] = {}
+    for gap in gaps:
+        if not gap.content.strip():
+            continue
+        gaps_by_left_uid.setdefault(gap.left_span_uid, []).append(gap)
+    for gap_list in gaps_by_left_uid.values():
+        gap_list.sort(key=lambda gap: gap.bbox[0])
+
+    line_texts = []
+    for line in group_native_spans_to_lines(spans):
+        parts = []
+        for span in line:
+            parts.append(span.content)
+            for gap in gaps_by_left_uid.get(span.uid, []):
+                parts.append(gap.content)
+        line_text = "".join(parts).strip()
+        if line_text:
+            line_texts.append(line_text)
+    return "\n".join(line_texts)
+
+
 def score_native_text_quality(text: str) -> float:
     stripped = text.strip()
     if not stripped:
@@ -148,10 +195,58 @@ def build_native_match(
     )
 
 
+def detect_native_gaps_for_block(
+    block_index: int,
+    block_bbox: BBox,
+    native_spans: list[NativeSpan],
+    overlap_threshold: float,
+    *,
+    width_ratio: float,
+    min_width: float,
+) -> list[NativeGap]:
+    matched = match_native_to_bbox(block_bbox, native_spans, overlap_threshold)
+    gaps: list[NativeGap] = []
+    for line in group_native_spans_to_lines(matched):
+        if len(line) < 2:
+            continue
+        char_widths = [
+            (span.bbox[2] - span.bbox[0]) / max(1, len(span.content.strip()))
+            for span in line
+            if span.content.strip()
+        ]
+        if not char_widths:
+            continue
+        char_widths.sort()
+        median_char_width = char_widths[len(char_widths) // 2]
+        gap_threshold = max(min_width, median_char_width * width_ratio)
+
+        for left, right in zip(line, line[1:]):
+            gap_width = right.bbox[0] - left.bbox[2]
+            if gap_width < gap_threshold:
+                continue
+            y0 = max(min(left.bbox[1], right.bbox[1]), block_bbox[1])
+            y1 = min(max(left.bbox[3], right.bbox[3]), block_bbox[3])
+            if y1 <= y0:
+                continue
+            gaps.append(
+                NativeGap(
+                    bbox=[
+                        max(left.bbox[2], block_bbox[0]),
+                        y0,
+                        min(right.bbox[0], block_bbox[2]),
+                        y1,
+                    ],
+                    block_index=block_index,
+                    left_span_uid=left.uid,
+                    right_span_uid=right.uid,
+                )
+            )
+    return gaps
+
+
 def text_similarity(left: str, right: str) -> float:
     left_norm = re.sub(r"\s+", "", left or "")
     right_norm = re.sub(r"\s+", "", right or "")
     if not left_norm or not right_norm:
         return 0.0
     return SequenceMatcher(None, left_norm, right_norm).ratio()
-

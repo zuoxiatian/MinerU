@@ -28,6 +28,11 @@ class FusionConfig:
     duplicate_threshold: float = 0.65
     native_overlap_threshold: float = 0.45
     min_visual_text_chars: int = 1
+    native_gap_enable: bool = True
+    native_gap_width_ratio: float = 2.5
+    native_gap_min_width: float = 18.0
+    native_gap_crop_padding_ratio: float = 0.8
+    native_gap_max_chars: int = 20
 
 
 def get_fusion_config() -> FusionConfig:
@@ -38,5 +43,9 @@ def get_fusion_config() -> FusionConfig:
         duplicate_threshold=_env_float("MINERU_VLM_DUPLICATE_THRESHOLD", 0.65),
         native_overlap_threshold=_env_float("MINERU_VLM_NATIVE_OVERLAP_THRESHOLD", 0.45),
         min_visual_text_chars=max(1, int(_env_float("MINERU_VLM_MIN_VISUAL_TEXT_CHARS", 1))),
+        native_gap_enable=_env_bool("MINERU_VLM_NATIVE_GAP_ENABLE", True),
+        native_gap_width_ratio=_env_float("MINERU_VLM_NATIVE_GAP_WIDTH_RATIO", 2.5),
+        native_gap_min_width=_env_float("MINERU_VLM_NATIVE_GAP_MIN_WIDTH", 18.0),
+        native_gap_crop_padding_ratio=_env_float("MINERU_VLM_NATIVE_GAP_CROP_PADDING_RATIO", 0.8),
+        native_gap_max_chars=max(1, int(_env_float("MINERU_VLM_NATIVE_GAP_MAX_CHARS", 20))),
     )
-

@@ -10,6 +10,7 @@ BBox = list[float]
 class NativeSpan:
     bbox: BBox
     content: str
+    uid: int = -1
     consumed: bool = False
 
 
@@ -31,6 +32,16 @@ class VisualTextCandidate:
 
 
 @dataclass
+class NativeGap:
+    bbox: BBox
+    block_index: int
+    left_span_uid: int
+    right_span_uid: int
+    content: str = ""
+    source: str = "vlm_gap"
+
+
+@dataclass
 class PageFusionContext:
     page_index: int
     page_width: int
@@ -39,6 +50,7 @@ class PageFusionContext:
     vlm_blocks: list[dict]
     native_spans: list[NativeSpan]
     visual_candidates: list[VisualTextCandidate]
+    native_gaps: list[NativeGap] = field(default_factory=list)
 
 
 @dataclass
@@ -51,6 +63,8 @@ class FusionMetrics:
     native_consumed_count: int = 0
     native_recovered_count: int = 0
     native_locked_count: int = 0
+    native_gap_count: int = 0
+    native_gap_filled_count: int = 0
     visual_supplement_count: int = 0
     visual_duplicate_skipped_count: int = 0
     source_conflict_count: int = 0
@@ -65,8 +79,9 @@ class FusionMetrics:
             "native_consumed_count": self.native_consumed_count,
             "native_recovered_count": self.native_recovered_count,
             "native_locked_count": self.native_locked_count,
+            "native_gap_count": self.native_gap_count,
+            "native_gap_filled_count": self.native_gap_filled_count,
             "visual_supplement_count": self.visual_supplement_count,
             "visual_duplicate_skipped_count": self.visual_duplicate_skipped_count,
             "source_conflict_count": self.source_conflict_count,
         }
-

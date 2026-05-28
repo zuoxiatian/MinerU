@@ -18,6 +18,11 @@ from mineru.backend.vlm.vlm_analyze import (
 )
 from mineru.backend.vlm_fusion.config import get_fusion_config
 from mineru.backend.vlm_fusion.fusion import fuse_page
+from mineru.backend.vlm_fusion.gap_recognizer import (
+    aio_recognize_native_gaps,
+    detect_native_gaps,
+    recognize_native_gaps,
+)
 from mineru.backend.vlm_fusion.middle_json import (
     append_page_fusion_to_middle_json,
     finalize_middle_json,
@@ -72,18 +77,31 @@ def _extract_window_native_spans(pdf_doc, page_start: int, count: int):
     return native_spans_list
 
 
+def _native_gap_to_dict(gap):
+    return {
+        "bbox": [round(value, 3) for value in gap.bbox],
+        "block_index": gap.block_index,
+        "left_span_uid": gap.left_span_uid,
+        "right_span_uid": gap.right_span_uid,
+        "content": gap.content,
+        "source": gap.source,
+    }
+
+
 def _fuse_window_pages(
     pdf_doc,
     window_start: int,
     layout_results,
     vlm_results,
     native_spans_list,
+    native_gaps_list=None,
 ):
     config = get_fusion_config()
+    native_gaps_list = native_gaps_list or [[] for _ in native_spans_list]
     fused_blocks_list = []
     metrics_list = []
-    for offset, (layout_blocks, vlm_blocks, native_spans) in enumerate(
-        zip(layout_results, vlm_results, native_spans_list)
+    for offset, (layout_blocks, vlm_blocks, native_spans, native_gaps) in enumerate(
+        zip(layout_results, vlm_results, native_spans_list, native_gaps_list)
     ):
         page_index = window_start + offset
         width, height = _page_size(pdf_doc, page_index)
@@ -102,11 +120,72 @@ def _fuse_window_pages(
             vlm_blocks=vlm_block_dicts,
             native_spans=native_spans,
             visual_candidates=visual_candidates,
+            native_gaps=native_gaps,
         )
         fused_blocks, metrics = fuse_page(context, config)
         fused_blocks_list.append(fused_blocks)
         metrics_list.append(metrics)
     return fused_blocks_list, metrics_list
+
+
+def _recognize_window_native_gaps(
+    predictor,
+    images_list,
+    vlm_results,
+    native_spans_list,
+):
+    config = get_fusion_config()
+    native_gaps_list = []
+    for image_dict, vlm_blocks, native_spans in zip(images_list, vlm_results, native_spans_list):
+        page_image = image_dict["img_pil"]
+        width, height = page_image.size
+        scale = image_dict["scale"]
+        pdf_width = int(width / scale)
+        pdf_height = int(height / scale)
+        vlm_block_dicts = [dict(block) for block in vlm_blocks]
+        for block_index, block in enumerate(vlm_block_dicts):
+            block.setdefault("index", block_index + 1)
+        gaps = detect_native_gaps(
+            vlm_block_dicts,
+            native_spans,
+            pdf_width,
+            pdf_height,
+            config,
+        )
+        native_gaps_list.append(
+            recognize_native_gaps(predictor, page_image, scale, gaps, config)
+        )
+    return native_gaps_list
+
+
+async def _aio_recognize_window_native_gaps(
+    predictor,
+    images_list,
+    vlm_results,
+    native_spans_list,
+):
+    config = get_fusion_config()
+    native_gaps_list = []
+    for image_dict, vlm_blocks, native_spans in zip(images_list, vlm_results, native_spans_list):
+        page_image = image_dict["img_pil"]
+        width, height = page_image.size
+        scale = image_dict["scale"]
+        pdf_width = int(width / scale)
+        pdf_height = int(height / scale)
+        vlm_block_dicts = [dict(block) for block in vlm_blocks]
+        for block_index, block in enumerate(vlm_block_dicts):
+            block.setdefault("index", block_index + 1)
+        gaps = detect_native_gaps(
+            vlm_block_dicts,
+            native_spans,
+            pdf_width,
+            pdf_height,
+            config,
+        )
+        native_gaps_list.append(
+            await aio_recognize_native_gaps(predictor, page_image, scale, gaps, config)
+        )
+    return native_gaps_list
 
 
 def doc_analyze(
@@ -174,24 +253,34 @@ def doc_analyze(
                         window_start,
                         len(images_pil_list),
                     )
+                    with predictor_execution_guard(predictor):
+                        native_gaps_list = _recognize_window_native_gaps(
+                            predictor,
+                            images_list,
+                            vlm_results,
+                            native_spans_list,
+                        )
                     fused_blocks_list, metrics_list = _fuse_window_pages(
                         pdf_doc,
                         window_start,
                         layout_results,
                         vlm_results,
                         native_spans_list,
+                        native_gaps_list,
                     )
                     model_output.extend(
                         {
                             "layout": [dict(block) for block in layout],
                             "vlm": [dict(block) for block in vlm],
                             "fused": fused,
+                            "native_gaps": [_native_gap_to_dict(gap) for gap in native_gaps],
                             "metrics": metrics.to_dict(),
                         }
-                        for layout, vlm, fused, metrics in zip(
+                        for layout, vlm, fused, native_gaps, metrics in zip(
                             layout_results,
                             vlm_results,
                             fused_blocks_list,
+                            native_gaps_list,
                             metrics_list,
                         )
                     )
@@ -296,6 +385,13 @@ async def aio_doc_analyze(
                         window_start,
                         len(images_pil_list),
                     )
+                    async with aio_predictor_execution_guard(predictor):
+                        native_gaps_list = await _aio_recognize_window_native_gaps(
+                            predictor,
+                            images_list,
+                            vlm_results,
+                            native_spans_list,
+                        )
                     fused_blocks_list, metrics_list = await asyncio.to_thread(
                         _fuse_window_pages,
                         pdf_doc,
@@ -303,18 +399,21 @@ async def aio_doc_analyze(
                         layout_results,
                         vlm_results,
                         native_spans_list,
+                        native_gaps_list,
                     )
                     model_output.extend(
                         {
                             "layout": [dict(block) for block in layout],
                             "vlm": [dict(block) for block in vlm],
                             "fused": fused,
+                            "native_gaps": [_native_gap_to_dict(gap) for gap in native_gaps],
                             "metrics": metrics.to_dict(),
                         }
-                        for layout, vlm, fused, metrics in zip(
+                        for layout, vlm, fused, native_gaps, metrics in zip(
                             layout_results,
                             vlm_results,
                             fused_blocks_list,
+                            native_gaps_list,
                             metrics_list,
                         )
                     )
