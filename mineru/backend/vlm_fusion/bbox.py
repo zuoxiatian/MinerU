@@ -5,6 +5,7 @@ from mineru.backend.vlm_fusion.schemas import BBox
 
 
 def clamp_bbox(bbox: BBox, width: float, height: float) -> BBox:
+    """把 bbox 限制在页面范围内，并保证 x0<=x1、y0<=y1。"""
     x0, y0, x1, y1 = [float(v) for v in bbox]
     x0, x1 = sorted((max(0.0, min(width, x0)), max(0.0, min(width, x1))))
     y0, y1 = sorted((max(0.0, min(height, y0)), max(0.0, min(height, y1))))
@@ -12,11 +13,13 @@ def clamp_bbox(bbox: BBox, width: float, height: float) -> BBox:
 
 
 def unit_to_pdf_bbox(bbox: BBox, width: float, height: float) -> BBox:
+    """归一化坐标转 PDF 页面坐标。"""
     x0, y0, x1, y1 = [float(v) for v in bbox]
     return clamp_bbox([x0 * width, y0 * height, x1 * width, y1 * height], width, height)
 
 
 def pdf_to_unit_bbox(bbox: BBox, width: float, height: float) -> BBox:
+    """PDF 页面坐标转归一化坐标，输出保留 6 位小数。"""
     if width <= 0 or height <= 0:
         return [0.0, 0.0, 0.0, 0.0]
     x0, y0, x1, y1 = clamp_bbox(bbox, width, height)
@@ -29,12 +32,14 @@ def pdf_to_unit_bbox(bbox: BBox, width: float, height: float) -> BBox:
 
 
 def bbox_area(bbox: BBox) -> float:
+    """计算 bbox 面积，非法宽高按 0 处理。"""
     return max(0.0, float(bbox[2]) - float(bbox[0])) * max(
         0.0, float(bbox[3]) - float(bbox[1])
     )
 
 
 def intersection_area(bbox1: BBox, bbox2: BBox) -> float:
+    """计算两个 bbox 的相交面积。"""
     x0 = max(float(bbox1[0]), float(bbox2[0]))
     y0 = max(float(bbox1[1]), float(bbox2[1]))
     x1 = min(float(bbox1[2]), float(bbox2[2]))
@@ -45,6 +50,10 @@ def intersection_area(bbox1: BBox, bbox2: BBox) -> float:
 
 
 def coverage_by_boxes(target_bbox: BBox, boxes: list[BBox]) -> float:
+    """计算 target_bbox 被一组 boxes 覆盖的比例。
+
+    多个 box 之间可能重叠，这里会先求交集矩形的并集面积，避免重复计数。
+    """
     target_area = bbox_area(target_bbox)
     if target_area <= 0 or not boxes:
         return 0.0
@@ -89,12 +98,13 @@ def coverage_by_boxes(target_bbox: BBox, boxes: list[BBox]) -> float:
 
 
 def center_in_bbox(inner: BBox, outer: BBox) -> bool:
+    """判断 inner 的中心点是否落在 outer 内。"""
     cx = (inner[0] + inner[2]) / 2
     cy = (inner[1] + inner[3]) / 2
     return outer[0] <= cx <= outer[2] and outer[1] <= cy <= outer[3]
 
 
 def reading_order_key(block: dict):
+    """返回一个简单阅读顺序 key：先按行 y，再按列 x。"""
     bbox = block.get("bbox") or [0, 0, 0, 0]
     return (round(float(bbox[1]) / 12) * 12, float(bbox[0]))
-

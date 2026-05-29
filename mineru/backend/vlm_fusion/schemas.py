@@ -8,6 +8,7 @@ BBox = list[float]
 
 @dataclass
 class NativeSpan:
+    """PDF 原生文本片段，bbox 使用 PDF 页面坐标。"""
     bbox: BBox
     content: str
     uid: int = -1
@@ -16,6 +17,7 @@ class NativeSpan:
 
 @dataclass
 class NativeMatch:
+    """一个 VLM block 匹配到的 PDF 原生文本结果。"""
     spans: list[NativeSpan]
     content: str
     quality: float
@@ -24,6 +26,7 @@ class NativeMatch:
 
 @dataclass
 class VisualTextCandidate:
+    """VLM 识别到、可能需要作为补充输出的文本候选。"""
     bbox: BBox
     content: str
     block_type: str
@@ -33,6 +36,7 @@ class VisualTextCandidate:
 
 @dataclass
 class NativeGap:
+    """PDF 原生 span 之间的可疑缺口。"""
     bbox: BBox
     block_index: int
     left_span_uid: int
@@ -43,6 +47,7 @@ class NativeGap:
 
 @dataclass
 class PageFusionContext:
+    """单页融合所需的完整输入。"""
     page_index: int
     page_width: int
     page_height: int
@@ -55,6 +60,7 @@ class PageFusionContext:
 
 @dataclass
 class FusionMetrics:
+    """单页融合过程中的统计指标，用于调试和质量观测。"""
     page_idx: int
     layout_block_count: int = 0
     native_span_count: int = 0

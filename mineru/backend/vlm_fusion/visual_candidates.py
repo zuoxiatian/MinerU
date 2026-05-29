@@ -10,6 +10,10 @@ def collect_visual_text_candidates(
     page_width: int,
     page_height: int,
 ) -> list[VisualTextCandidate]:
+    """从 VLM 文本 block 中收集可用于补充输出的候选。
+
+    候选 bbox 转成 PDF 坐标，便于后续与 PDF 原生 span 做覆盖率比较。
+    """
     candidates: list[VisualTextCandidate] = []
     for block in vlm_blocks:
         block_type = block.get("type", "text")
@@ -36,4 +40,3 @@ def collect_visual_text_candidates(
             )
         )
     return candidates
-

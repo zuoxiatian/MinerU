@@ -5,6 +5,11 @@ import asyncio
 
 
 def _flatten_prepared_inputs(prepared_inputs):
+    """把每页 prepare_for_extract 的结果展平，方便一次性批量调用模型。
+
+    返回的 all_indices 记录每个裁图结果属于哪一页、哪一个 block，
+    模型输出回来后再按这个索引写回 layout_results。
+    """
     all_images = []
     all_prompts = []
     all_params = []
@@ -19,6 +24,7 @@ def _flatten_prepared_inputs(prepared_inputs):
 
 
 def batch_layout_detect(predictor, images):
+    """同步批量版面检测入口，直接委托给 predictor。"""
     return predictor.batch_layout_detect(images)
 
 
@@ -28,6 +34,12 @@ def batch_content_extract_from_layouts(
     layout_results,
     image_analysis: bool = True,
 ):
+    """同步批量内容识别。
+
+    helper 先根据 layout_results 准备 block 裁图、prompt 和推理参数；
+    predictor 批量生成文本后写回原 layout block；最后由 helper 做统一后处理，
+    输出融合层使用的标准 block 列表。
+    """
     prepared_inputs = predictor.helper.batch_prepare_for_extract(
         predictor.executor,
         images,
@@ -46,6 +58,7 @@ def batch_content_extract_from_layouts(
 
 
 async def aio_batch_layout_detect(predictor, images):
+    """异步批量版面检测入口。"""
     return await predictor.aio_batch_layout_detect(images)
 
 
@@ -55,6 +68,7 @@ async def aio_batch_content_extract_from_layouts(
     layout_results,
     image_analysis: bool = True,
 ):
+    """异步批量内容识别，流程与同步函数保持一致。"""
     prepared_inputs = await asyncio.gather(
         *[
             predictor.helper.aio_prepare_for_extract(
@@ -86,4 +100,3 @@ async def aio_batch_content_extract_from_layouts(
             for layout_result in layout_results
         ]
     )
-

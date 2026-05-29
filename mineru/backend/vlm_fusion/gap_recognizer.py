@@ -20,6 +20,8 @@ _DROP_GAP_VALUES = {
     "\u6ca1\u6709\u6587\u5b57",
     "\u6ca1\u6709\u6587\u672c",
 }
+# gap 识别只负责补 span 中间的小缺口。模型常会把裁图边缘的标点或括号也读出来，
+# 所以这里只清理 gap 结果的首尾标点，不影响普通文本块。
 _EDGE_PUNCTUATION = (
     " \t\r\n,"
     "\uff0c.\u3002!\uff01?\uff1f:\uff1a;\uff1b\u3001"
@@ -34,6 +36,7 @@ def detect_native_gaps(
     page_height: int,
     config: FusionConfig,
 ) -> list[NativeGap]:
+    """检测一页内所有文本 block 的 PDF 原生文本缺口。"""
     if not config.native_gap_enable:
         return []
     gaps: list[NativeGap] = []
@@ -62,6 +65,11 @@ def crop_gap_image(
     scale: float,
     config: FusionConfig,
 ) -> Image.Image | None:
+    """按 PDF 坐标中的 gap bbox 裁切页面图片。
+
+    gap.bbox 使用 PDF 页面坐标，page_image 使用渲染后的像素坐标，因此需要乘以 scale。
+    上下 padding 用于保留完整字形，左右 padding 较小，避免把相邻 span 一起读进来。
+    """
     x0, y0, x1, y1 = gap.bbox
     line_height = max(1.0, y1 - y0)
     padding = line_height * config.native_gap_crop_padding_ratio
@@ -77,6 +85,14 @@ def crop_gap_image(
 
 
 def normalize_gap_text(text: str | None, max_chars: int) -> str:
+    """清理 gap 裁图的 VLM 识别结果。
+
+    注意：这不是全局文本归一化。它只用于缺口补字：
+    - 删除所有空白，避免把一个缺口补成多段。
+    - 去掉首尾标点，降低裁图边缘误识别影响。
+    - 过滤模型表示“无文本”的常见回答。
+    - 过长内容直接丢弃，避免小缺口识别成整行文本。
+    """
     if text is None:
         return ""
     normalized = re.sub(r"\s+", "", str(text))
@@ -98,6 +114,7 @@ def recognize_native_gaps(
     gaps: list[NativeGap],
     config: FusionConfig,
 ) -> list[NativeGap]:
+    """同步识别 gap 内容，并把结果写回 NativeGap.content。"""
     if not gaps:
         return gaps
     gap_images = []
@@ -132,6 +149,7 @@ async def aio_recognize_native_gaps(
     gaps: list[NativeGap],
     config: FusionConfig,
 ) -> list[NativeGap]:
+    """异步识别 gap 内容，并把结果写回 NativeGap.content。"""
     if not gaps:
         return gaps
     gap_images = []

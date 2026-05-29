@@ -22,10 +22,16 @@ from mineru.backend.vlm_fusion.schemas import FusionMetrics, PageFusionContext
 
 
 def _row_order_key(pdf_bbox):
+    """按行阅读顺序排序；y 坐标做 12pt 粒度归并，降低同一行内轻微抖动的影响。"""
     return (round(float(pdf_bbox[1]) / 12) * 12, float(pdf_bbox[0]))
 
 
 def _detect_reading_columns(blocks: list[dict], page_width: int, page_height: int):
+    """粗略判断页面是否存在左右分栏。
+
+    这里只用于最终 fused block 排序，不改变 block 内容。算法刻意保持简单：
+    先排除很宽的跨栏块，再按块中心点横向距离寻找最大间隔。
+    """
     items = []
     for block in blocks:
         bbox = block_pdf_bbox(block, page_width, page_height)
@@ -68,6 +74,10 @@ def _detect_reading_columns(blocks: list[dict], page_width: int, page_height: in
 
 
 def _sort_fused_blocks(blocks: list[dict], page_width: int, page_height: int):
+    """对融合后的 blocks 做阅读顺序排序。
+
+    普通页面按行排序；疑似双栏页面先按栏，再按栏内行序排序。
+    """
     columns = _detect_reading_columns(blocks, page_width, page_height)
     if not columns:
         blocks.sort(key=lambda block: _row_order_key(block_pdf_bbox(block, page_width, page_height)))
@@ -93,11 +103,16 @@ def _sort_fused_blocks(blocks: list[dict], page_width: int, page_height: int):
 
 
 def _next_index(blocks: list[dict]) -> int:
+    """返回新增 block 可使用的下一个 index。"""
     indexes = [int(block.get("index", idx + 1)) for idx, block in enumerate(blocks)]
     return (max(indexes) + 1) if indexes else 1
 
 
 def _is_duplicate_visual_candidate(candidate, locked_spans, config: FusionConfig):
+    """判断 VLM 视觉候选文本是否已经被可靠原生文本覆盖。
+
+    同时看 bbox 覆盖率和文本相似度，避免把同一段文本重复补成 visual_supplement。
+    """
     coverage = coverage_by_boxes(candidate.bbox, [span.bbox for span in locked_spans])
     native_text = join_native_spans(locked_spans)
     similarity = text_similarity(candidate.content, native_text)
@@ -105,6 +120,15 @@ def _is_duplicate_visual_candidate(candidate, locked_spans, config: FusionConfig
 
 
 def fuse_page(context: PageFusionContext, config: FusionConfig) -> tuple[list[dict], FusionMetrics]:
+    """融合单页的 VLM 结果和 PDF 原生文本。
+
+    决策优先级：
+    1. 文本类 block 如果能匹配到高质量原生文本，使用 PDF 原生文本锁定 content。
+    2. 原生文本不可靠时，保留 VLM content 作为 fallback。
+    3. 结构类 block 直接保留 VLM 结果。
+    4. 未被原生文本覆盖的 VLM 文本可作为 visual_supplement 补充。
+    5. 仍未消费的 PDF 原生 span 可作为 pdf_native_recovered 补回。
+    """
     metrics = FusionMetrics(
         page_idx=context.page_index,
         layout_block_count=len(context.layout_blocks),
@@ -120,6 +144,7 @@ def fuse_page(context: PageFusionContext, config: FusionConfig) -> tuple[list[di
     emitted_vlm_indices = set()
 
     for index, block in enumerate(context.vlm_blocks):
+        # 以 VLM block 为主轴遍历页面内容；文本类 block 会尝试寻找同位置的 PDF 原生文本。
         block.setdefault("index", index + 1)
         block_type = block.get("type", "text")
         if is_textual_type(block_type):
@@ -131,6 +156,8 @@ def fuse_page(context: PageFusionContext, config: FusionConfig) -> tuple[list[di
             )
             vlm_content = block.get("content") or ""
             if native_match.reliable:
+                # 原生文本可靠时优先使用原生文本，减少 VLM/OCR 对普通文字的误读。
+                # 如果前面识别到了同一个 block 内的 gap，则把 gap 内容插回 span 之间。
                 block_gaps = [
                     gap
                     for gap in context.native_gaps
@@ -161,6 +188,8 @@ def fuse_page(context: PageFusionContext, config: FusionConfig) -> tuple[list[di
                     )
                 )
             else:
+                # 原生文本质量差或没有匹配内容时，回退到 VLM 识别文本。
+                # 如果 VLM 有内容，也把已匹配 span 标记为 consumed，避免后面重复补出。
                 if vlm_content:
                     for span in native_match.spans:
                         span.consumed = True
@@ -176,6 +205,7 @@ def fuse_page(context: PageFusionContext, config: FusionConfig) -> tuple[list[di
                     )
                 )
         elif is_structural_type(block_type):
+            # 表格、图片、公式、代码等结构类区域不做原生文本替换。
             fused_blocks.append(copy_model_block(block))
         else:
             fused_blocks.append(copy_model_block(block))
@@ -185,6 +215,8 @@ def fuse_page(context: PageFusionContext, config: FusionConfig) -> tuple[list[di
     if config.visual_supplement:
         next_index = _next_index(fused_blocks)
         for candidate in context.visual_candidates:
+            # visual_supplement 用于补 VLM 看见但原生文本没有覆盖的文字，
+            # 例如图片中的文字、页眉页脚或特殊渲染文本。
             if len(candidate.content.strip()) < config.min_visual_text_chars:
                 continue
             if candidate.raw.get("index") in emitted_vlm_indices:
@@ -224,8 +256,10 @@ def fuse_page(context: PageFusionContext, config: FusionConfig) -> tuple[list[di
         if span.consumed or not span.content.strip():
             continue
         if coverage_by_boxes(span.bbox, structural_bboxes) >= 0.5:
+            # 落在表格/图片等结构区域里的残留原生文本不补，避免破坏结构块。
             span.consumed = True
             continue
+        # 没有被任何 VLM 文本块消费到的原生文本，作为恢复块补回。
         fused_blocks.append(
             {
                 "type": "text",

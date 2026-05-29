@@ -53,6 +53,7 @@ from mineru.utils.pdfium_guard import (
 
 
 def _close_images(images_list):
+    """释放窗口内渲染出来的 PIL 图像，避免长文档处理时占用过多内存。"""
     for image_dict in images_list or []:
         pil_img = image_dict.get("img_pil")
         if pil_img is not None:
@@ -63,12 +64,18 @@ def _close_images(images_list):
 
 
 def _page_size(pdf_doc, page_index: int) -> tuple[int, int]:
+    """读取 PDF 页面的原始坐标尺寸，后续用于 VLM 归一化 bbox 与 PDF bbox 互转。"""
     with pdfium_guard():
         page = pdf_doc[page_index]
         return tuple(map(int, page.get_size()))
 
 
 def _extract_window_native_spans(pdf_doc, page_start: int, count: int):
+    """抽取一个窗口内每页的 PDF 原生文本 span。
+
+    返回值与窗口页序一一对应：第 N 个元素就是窗口内第 N 页的原生文本列表。
+    原生文本后续会作为普通文本块的优先来源。
+    """
     native_spans_list = []
     for offset in range(count):
         with pdfium_guard():
@@ -78,6 +85,7 @@ def _extract_window_native_spans(pdf_doc, page_start: int, count: int):
 
 
 def _native_gap_to_dict(gap):
+    """把 NativeGap 转成可序列化字典，放入调试用的 model_output。"""
     return {
         "bbox": [round(value, 3) for value in gap.bbox],
         "block_index": gap.block_index,
@@ -96,6 +104,11 @@ def _fuse_window_pages(
     native_spans_list,
     native_gaps_list=None,
 ):
+    """融合一个处理窗口内的所有页面。
+
+    这里把 VLM block、PDF 原生文本、视觉补充候选和 gap 识别结果组装成
+    PageFusionContext，然后交给 fusion.py::fuse_page 做页面级决策。
+    """
     config = get_fusion_config()
     native_gaps_list = native_gaps_list or [[] for _ in native_spans_list]
     fused_blocks_list = []
@@ -105,6 +118,9 @@ def _fuse_window_pages(
     ):
         page_index = window_start + offset
         width, height = _page_size(pdf_doc, page_index)
+
+        # VLM 输出对象可能是模型自定义 block，这里统一复制成 dict，
+        # 并补齐 index，保证后续 gap 匹配和调试输出有稳定块编号。
         vlm_block_dicts = [dict(block) for block in vlm_blocks]
         for block_index, block in enumerate(vlm_block_dicts):
             block.setdefault("index", block_index + 1)
@@ -112,6 +128,9 @@ def _fuse_window_pages(
         for block_index, block in enumerate(layout_block_dicts):
             block.setdefault("index", block_index + 1)
         visual_candidates = collect_visual_text_candidates(vlm_block_dicts, width, height)
+
+        # PageFusionContext 是页面融合的完整输入快照：
+        # layout blocks 目前主要用于统计和调试，融合决策以 vlm_blocks 为主。
         context = PageFusionContext(
             page_index=page_index,
             page_width=width,
@@ -134,6 +153,12 @@ def _recognize_window_native_gaps(
     vlm_results,
     native_spans_list,
 ):
+    """同步识别窗口内每页的原生文本缺口。
+
+    原生 PDF 文本有时会把可见字符拆成多个 span，中间的图片化字符或异常字符
+    可能没有出现在原生文本中。这里先按几何距离检测可疑空隙，再裁图交给 VLM
+    识别，识别结果会在融合时插回相邻 span 之间。
+    """
     config = get_fusion_config()
     native_gaps_list = []
     for image_dict, vlm_blocks, native_spans in zip(images_list, vlm_results, native_spans_list):
@@ -164,6 +189,7 @@ async def _aio_recognize_window_native_gaps(
     vlm_results,
     native_spans_list,
 ):
+    """异步版本的窗口原生文本缺口识别，逻辑与同步函数保持一致。"""
     config = get_fusion_config()
     native_gaps_list = []
     for image_dict, vlm_blocks, native_spans in zip(images_list, vlm_results, native_spans_list):
@@ -198,6 +224,16 @@ def doc_analyze(
     image_analysis: bool = True,
     **kwargs,
 ):
+    """VLM fusion 同步入口。
+
+    完整流程：
+    1. 初始化模型和 PDF 文档。
+    2. 按窗口渲染页面，减少一次性加载大文档造成的内存压力。
+    3. 先跑 VLM layout，再按 layout 做内容识别。
+    4. 抽取 PDF 原生文本，并识别原生文本之间的可疑缺口。
+    5. 调用 fuse_page 产出 fused blocks。
+    6. 转成 middle_json，同时返回便于排查的 model_output。
+    """
     if predictor is None:
         predictor = ModelSingleton().get_model(backend, model_path, server_url, **kwargs)
     predictor = _maybe_enable_serial_execution(predictor, backend)
@@ -226,6 +262,9 @@ def doc_analyze(
         try:
             for window_index, window_start in enumerate(range(0, page_count, effective_window_size or 1)):
                 window_end = min(page_count - 1, window_start + effective_window_size - 1)
+
+                # 每个窗口独立渲染、推理、融合、释放图片，避免长文档处理时
+                # PIL 图像和模型中间结果长期堆积。
                 images_list = load_images_from_pdf_doc(
                     pdf_doc,
                     start_page_id=window_start,
@@ -241,6 +280,8 @@ def doc_analyze(
                         f"({len(images_pil_list)} pages)"
                     )
                     with predictor_execution_guard(predictor):
+                        # layout_results 是页面区域结构；vlm_results 是同一批区域
+                        # 经过内容识别和后处理后的 block 列表。
                         layout_results = batch_layout_detect(predictor, images_pil_list)
                         vlm_results = batch_content_extract_from_layouts(
                             predictor,
@@ -254,6 +295,8 @@ def doc_analyze(
                         len(images_pil_list),
                     )
                     with predictor_execution_guard(predictor):
+                        # gap 识别依赖 VLM block 的 bbox 和 PDF 原生 span 的 bbox，
+                        # 识别结果只用于补齐原生文本中的小缺口。
                         native_gaps_list = _recognize_window_native_gaps(
                             predictor,
                             images_list,
@@ -268,6 +311,8 @@ def doc_analyze(
                         native_spans_list,
                         native_gaps_list,
                     )
+                    # model_output 保留 layout/vlm/fused/native_gaps/metrics，
+                    # 主要用于调试融合决策，不是最终 middle_json 的必要字段。
                     model_output.extend(
                         {
                             "layout": [dict(block) for block in layout],
@@ -330,6 +375,11 @@ async def aio_doc_analyze(
     image_analysis: bool = True,
     **kwargs,
 ):
+    """VLM fusion 异步入口。
+
+    与 doc_analyze 的业务流程相同；差异是模型调用使用 async API，
+    CPU/同步 PDF 操作通过 asyncio.to_thread 放到线程中执行，避免阻塞事件循环。
+    """
     if predictor is None:
         predictor = await _get_model_async(backend, model_path, server_url, **kwargs)
     predictor = _maybe_enable_serial_execution(predictor, backend)
@@ -358,6 +408,8 @@ async def aio_doc_analyze(
         try:
             for window_index, window_start in enumerate(range(0, page_count, effective_window_size or 1)):
                 window_end = min(page_count - 1, window_start + effective_window_size - 1)
+
+                # 异步路径从 pdf_bytes 渲染窗口页面，避免在事件循环里直接执行重 CPU/IO 工作。
                 images_list = await aio_load_images_from_pdf_bytes_range(
                     pdf_bytes,
                     start_page_id=window_start,
@@ -372,6 +424,7 @@ async def aio_doc_analyze(
                         f"({len(images_pil_list)} pages)"
                     )
                     async with aio_predictor_execution_guard(predictor):
+                        # 与同步入口一致：先 layout，后内容识别，再做 helper post process。
                         layout_results = await aio_batch_layout_detect(predictor, images_pil_list)
                         vlm_results = await aio_batch_content_extract_from_layouts(
                             predictor,

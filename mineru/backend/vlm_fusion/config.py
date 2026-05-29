@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 
 def _env_bool(name: str, default: bool) -> bool:
+    """读取布尔环境变量，支持 1/true/yes/on。"""
     value = os.getenv(name)
     if value is None:
         return default
@@ -11,6 +12,7 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 def _env_float(name: str, default: float) -> float:
+    """读取浮点环境变量；非法值回退默认值。"""
     value = os.getenv(name)
     if value is None:
         return default
@@ -22,6 +24,10 @@ def _env_float(name: str, default: float) -> float:
 
 @dataclass(frozen=True)
 class FusionConfig:
+    """VLM fusion 的运行配置。
+
+    大多数阈值通过环境变量覆盖，便于在线上调试不同 PDF 类型时快速试验。
+    """
     debug: bool = False
     visual_supplement: bool = True
     supplement_in_visual_region: bool = False
@@ -36,6 +42,7 @@ class FusionConfig:
 
 
 def get_fusion_config() -> FusionConfig:
+    """从环境变量构造融合配置。"""
     return FusionConfig(
         debug=_env_bool("MINERU_VLM_FUSION_DEBUG", False),
         visual_supplement=_env_bool("MINERU_VLM_VISUAL_SUPPLEMENT", True),

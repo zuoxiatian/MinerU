@@ -15,6 +15,7 @@ _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 
 
 def _coerce_bbox(value) -> BBox | None:
+    """把不同来源的 bbox 表示统一成合法的 [x0, y0, x1, y1] 浮点列表。"""
     if value is None:
         return None
     if hasattr(value, "bbox"):
@@ -33,6 +34,7 @@ def _coerce_bbox(value) -> BBox | None:
 
 
 def _line_text(line: dict) -> str:
+    """从 line 结构中取文本；优先使用 line.text，否则拼接内部 spans。"""
     text = line.get("text")
     if isinstance(text, str):
         return text
@@ -46,6 +48,11 @@ def _line_text(line: dict) -> str:
 
 
 def extract_native_spans(pdf_page) -> list[NativeSpan]:
+    """从 PDF 页面抽取原生文本 span。
+
+    这里不做 OCR，只读取 PDF 内置的文本层。每个 span 会保留 bbox、content 和 uid，
+    后续融合阶段通过 bbox 把这些 span 匹配到 VLM 文本 block。
+    """
     try:
         page_chars = get_page_chars(pdf_page)
         lines = get_lines_from_chars(page_chars["chars"])
@@ -60,6 +67,7 @@ def extract_native_spans(pdf_page) -> list[NativeSpan]:
         spans = line.get("spans") or []
         added_span = False
         for span in spans:
+            # span bbox 缺失时使用 line bbox 兜底，保证文本仍有几何位置可用于匹配。
             bbox = _coerce_bbox(span.get("bbox")) or line_bbox
             content = span.get("text") or span.get("content") or ""
             if bbox and str(content).strip():
@@ -75,6 +83,7 @@ def extract_native_spans(pdf_page) -> list[NativeSpan]:
 
 
 def _span_overlap_ratio(span_bbox: BBox, block_bbox: BBox) -> float:
+    """计算原生 span 被目标 block 覆盖的比例。"""
     span_area = max(1.0, (span_bbox[2] - span_bbox[0]) * (span_bbox[3] - span_bbox[1]))
     return intersection_area(span_bbox, block_bbox) / span_area
 
@@ -84,6 +93,11 @@ def match_native_to_bbox(
     native_spans: list[NativeSpan],
     overlap_threshold: float,
 ) -> list[NativeSpan]:
+    """把未消费的 PDF 原生 span 匹配到一个 VLM block 的 bbox。
+
+    匹配条件是 span 与 block 有足够重叠，或者 span 中心点落在 block 内。
+    已消费的 span 不会再次参与匹配，避免同一段文本被重复输出。
+    """
     matched = []
     for span in native_spans:
         if span.consumed:
@@ -98,6 +112,11 @@ def match_native_to_bbox(
 
 
 def join_native_spans(spans: list[NativeSpan]) -> str:
+    """按阅读顺序拼接原生 spans。
+
+    同一行内直接拼接，不额外插入空格；换行之间用 ``\n`` 分隔。
+    这样可以最大限度保留 PDF 原生文本层的字符和标点。
+    """
     if not spans:
         return ""
     lines: list[list[NativeSpan]] = []
@@ -120,6 +139,7 @@ def join_native_spans(spans: list[NativeSpan]) -> str:
 
 
 def group_native_spans_to_lines(spans: list[NativeSpan]) -> list[list[NativeSpan]]:
+    """把原生 spans 按 y 坐标聚合成行，并在行内按 x 坐标排序。"""
     if not spans:
         return []
     sorted_spans = sorted(spans, key=lambda span: reading_order_key({"bbox": span.bbox}))
@@ -140,6 +160,7 @@ def group_native_spans_to_lines(spans: list[NativeSpan]) -> list[list[NativeSpan
 
 
 def join_native_spans_with_gaps(spans: list[NativeSpan], gaps: list[NativeGap]) -> str:
+    """拼接原生 spans，并把已识别的 gap 内容插回左侧 span 之后。"""
     if not spans:
         return ""
     gaps_by_left_uid: dict[int, list[NativeGap]] = {}
@@ -164,6 +185,11 @@ def join_native_spans_with_gaps(spans: list[NativeSpan], gaps: list[NativeGap]) 
 
 
 def score_native_text_quality(text: str) -> float:
+    """评估 PDF 原生文本是否可用。
+
+    当前主要惩罚控制字符和 Unicode replacement character。分数越高，说明
+    文本层越干净；融合阶段默认 0.85 以上才会优先锁定原生文本。
+    """
     stripped = text.strip()
     if not stripped:
         return 0.0
@@ -184,6 +210,7 @@ def build_native_match(
     native_spans: list[NativeSpan],
     overlap_threshold: float,
 ) -> NativeMatch:
+    """构造一个 VLM block 对应的原生文本匹配结果。"""
     spans = match_native_to_bbox(block_bbox, native_spans, overlap_threshold)
     content = join_native_spans(spans)
     quality = score_native_text_quality(content)
@@ -204,6 +231,11 @@ def detect_native_gaps_for_block(
     width_ratio: float,
     min_width: float,
 ) -> list[NativeGap]:
+    """检测单个文本 block 内原生 span 之间的可疑空隙。
+
+    空隙阈值由 span 的中位字符宽度和配置中的最小宽度共同决定。
+    检测结果只记录 bbox 和左右 span uid，真正的文字内容稍后由 VLM 裁图识别。
+    """
     matched = match_native_to_bbox(block_bbox, native_spans, overlap_threshold)
     gaps: list[NativeGap] = []
     for line in group_native_spans_to_lines(matched):
@@ -245,6 +277,10 @@ def detect_native_gaps_for_block(
 
 
 def text_similarity(left: str, right: str) -> float:
+    """比较两段文本相似度。
+
+    这里只去除空白，不删除标点；因此标点差异会影响相似度。
+    """
     left_norm = re.sub(r"\s+", "", left or "")
     right_norm = re.sub(r"\s+", "", right or "")
     if not left_norm or not right_norm:
