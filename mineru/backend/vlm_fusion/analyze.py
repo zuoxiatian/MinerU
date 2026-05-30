@@ -106,6 +106,19 @@ def _fuse_window_pages(
 ):
     """融合一个处理窗口内的所有页面。
 
+    参数：
+    - pdf_doc: pdfium 文档对象，用于获取每页尺寸。
+    - window_start: 当前窗口在整份 PDF 中的起始页号。
+    - layout_results: VLM layout detection 的页面级 block 列表。
+    - vlm_results: VLM content extraction 的页面级 block 列表。
+    - native_spans_list: 每页从 PDF 文本层抽取到的 native spans。
+    - native_gaps_list: 每页已裁图识别的 native gap 结果。
+
+    返回：
+    - fused_blocks_list: 每页最终融合后的 block 列表。
+    - metrics_list: 每页融合指标。
+    - compare_records_list: 每页 bbox 文本对比记录，只包含 native/VLM/final 三份文本。
+
     这里把 VLM block、PDF 原生文本、视觉补充候选和 gap 识别结果组装成
     PageFusionContext，然后交给 fusion.py::fuse_page 做页面级决策。
     """
@@ -113,6 +126,7 @@ def _fuse_window_pages(
     native_gaps_list = native_gaps_list or [[] for _ in native_spans_list]
     fused_blocks_list = []
     metrics_list = []
+    compare_records_list = []
     for offset, (layout_blocks, vlm_blocks, native_spans, native_gaps) in enumerate(
         zip(layout_results, vlm_results, native_spans_list, native_gaps_list)
     ):
@@ -141,10 +155,11 @@ def _fuse_window_pages(
             visual_candidates=visual_candidates,
             native_gaps=native_gaps,
         )
-        fused_blocks, metrics = fuse_page(context, config)
+        fused_blocks, metrics, compare_records = fuse_page(context, config)
         fused_blocks_list.append(fused_blocks)
         metrics_list.append(metrics)
-    return fused_blocks_list, metrics_list
+        compare_records_list.append(compare_records)
+    return fused_blocks_list, metrics_list, compare_records_list
 
 
 def _recognize_window_native_gaps(
@@ -303,7 +318,7 @@ def doc_analyze(
                             vlm_results,
                             native_spans_list,
                         )
-                    fused_blocks_list, metrics_list = _fuse_window_pages(
+                    fused_blocks_list, metrics_list, compare_records_list = _fuse_window_pages(
                         pdf_doc,
                         window_start,
                         layout_results,
@@ -318,13 +333,15 @@ def doc_analyze(
                             "layout": [dict(block) for block in layout],
                             "vlm": [dict(block) for block in vlm],
                             "fused": fused,
+                            "bbox_text_compare": compare_records,
                             "native_gaps": [_native_gap_to_dict(gap) for gap in native_gaps],
                             "metrics": metrics.to_dict(),
                         }
-                        for layout, vlm, fused, native_gaps, metrics in zip(
+                        for layout, vlm, fused, compare_records, native_gaps, metrics in zip(
                             layout_results,
                             vlm_results,
                             fused_blocks_list,
+                            compare_records_list,
                             native_gaps_list,
                             metrics_list,
                         )
@@ -445,7 +462,7 @@ async def aio_doc_analyze(
                             vlm_results,
                             native_spans_list,
                         )
-                    fused_blocks_list, metrics_list = await asyncio.to_thread(
+                    fused_blocks_list, metrics_list, compare_records_list = await asyncio.to_thread(
                         _fuse_window_pages,
                         pdf_doc,
                         window_start,
@@ -459,13 +476,15 @@ async def aio_doc_analyze(
                             "layout": [dict(block) for block in layout],
                             "vlm": [dict(block) for block in vlm],
                             "fused": fused,
+                            "bbox_text_compare": compare_records,
                             "native_gaps": [_native_gap_to_dict(gap) for gap in native_gaps],
                             "metrics": metrics.to_dict(),
                         }
-                        for layout, vlm, fused, native_gaps, metrics in zip(
+                        for layout, vlm, fused, compare_records, native_gaps, metrics in zip(
                             layout_results,
                             vlm_results,
                             fused_blocks_list,
+                            compare_records_list,
                             native_gaps_list,
                             metrics_list,
                         )

@@ -208,6 +208,39 @@ def _prepare_pdf_bytes(pdf_bytes_list, start_page_id, end_page_id):
     return result
 
 
+def _extract_bbox_text_compare(model_output):
+    """从 VLM fusion 的 model_output 中提取 bbox 文本对比记录。
+
+    参数：
+    - model_output: analyze 阶段返回的调试输出。只有 VLM fusion 后端会包含
+      ``bbox_text_compare``。
+
+    返回：
+    - records: 扁平列表，每条只保留 page_index、bbox_index、native_text、
+      vlm_text、final_text。该列表会写入 ``*_bbox_text_compare.json``，方便人工
+      检查每个 bbox 内本地读取、VLM 识别和最终融合文本的差异。
+    """
+    records = []
+    if not isinstance(model_output, list):
+        return records
+    for page in model_output:
+        if not isinstance(page, dict):
+            continue
+        for record in page.get("bbox_text_compare") or []:
+            if not isinstance(record, dict):
+                continue
+            records.append(
+                {
+                    "page_index": record.get("page_index"),
+                    "bbox_index": record.get("bbox_index"),
+                    "native_text": record.get("native_text", ""),
+                    "vlm_text": record.get("vlm_text", ""),
+                    "final_text": record.get("final_text", ""),
+                }
+            )
+    return records
+
+
 def _process_output(
         pdf_info,
         pdf_bytes,
@@ -295,6 +328,13 @@ def _process_output(
         md_writer.write_string(
             f"{pdf_file_name}_model.json",
             json.dumps(model_output, ensure_ascii=False, indent=4),
+        )
+
+    bbox_text_compare = _extract_bbox_text_compare(model_output)
+    if bbox_text_compare:
+        md_writer.write_string(
+            f"{pdf_file_name}_bbox_text_compare.json",
+            json.dumps(bbox_text_compare, ensure_ascii=False, indent=4),
         )
 
     logger.debug(f"local output dir is {local_md_dir}")

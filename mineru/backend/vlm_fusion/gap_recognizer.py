@@ -26,7 +26,38 @@ _EDGE_PUNCTUATION = (
     " \t\r\n,"
     "\uff0c.\u3002!\uff01?\uff1f:\uff1a;\uff1b\u3001"
     "'\"\u201c\u201d\u2018\u2019()\uff08\uff09[]\u3010\u3011{}"
+    "-\u2013\u2014\u2190\u2192\u2194"
 )
+
+
+def _contains_cjk(text: str) -> bool:
+    return any(
+        "\u3400" <= char <= "\u4dbf"
+        or "\u4e00" <= char <= "\u9fff"
+        or "\uf900" <= char <= "\ufaff"
+        for char in text
+    )
+
+
+def _is_safe_gap_text(text: str) -> bool:
+    """判断 gap 识别结果是否适合插回 native 文本。
+
+    gap 裁图很小，VLM 容易把目录连接线、箭头、页码或边缘符号误读成内容。
+    因此这里只允许较安全的缺字结果：
+    - 中文等 CJK 字符直接允许，例如“公羊”。
+    - 纯数字不允许，避免页码/编号被误补。
+    - 单个 ASCII 字母不允许，避免装饰线或边缘噪声误成 L/T/I。
+    - 纯符号不允许，例如“→”“-”“—”。
+    """
+    if not text:
+        return False
+    if _contains_cjk(text):
+        return True
+    if text.isdigit():
+        return False
+    if text.isascii() and len(text) <= 1:
+        return False
+    return any(char.isalpha() for char in text)
 
 
 def detect_native_gaps(
@@ -103,6 +134,8 @@ def normalize_gap_text(text: str | None, max_chars: int) -> str:
         return ""
     visible_count = sum(1 for char in normalized if not char.isspace())
     if visible_count == 0:
+        return ""
+    if not _is_safe_gap_text(normalized):
         return ""
     return normalized
 

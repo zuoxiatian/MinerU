@@ -74,6 +74,8 @@ class FusionMetrics:
     visual_supplement_count: int = 0
     visual_duplicate_skipped_count: int = 0
     source_conflict_count: int = 0
+    native_vlm_order_applied_count: int = 0
+    native_vlm_missing_filled_count: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -90,4 +92,6 @@ class FusionMetrics:
             "visual_supplement_count": self.visual_supplement_count,
             "visual_duplicate_skipped_count": self.visual_duplicate_skipped_count,
             "source_conflict_count": self.source_conflict_count,
+            "native_vlm_order_applied_count": self.native_vlm_order_applied_count,
+            "native_vlm_missing_filled_count": self.native_vlm_missing_filled_count,
         }

@@ -1,6 +1,14 @@
 # Copyright (c) Opendatalab. All rights reserved.
 from __future__ import annotations
 
+from difflib import SequenceMatcher
+
+from mineru.backend.vlm_fusion.char_alignment import (
+    CharAlignConfig,
+    align_native_with_vlm,
+    merge_native_with_vlm,
+    normalize_char,
+)
 from mineru.backend.vlm_fusion.bbox import coverage_by_boxes
 from mineru.backend.vlm_fusion.block_builder import (
     block_pdf_bbox,
@@ -119,7 +127,254 @@ def _is_duplicate_visual_candidate(candidate, locked_spans, config: FusionConfig
     return coverage >= config.duplicate_threshold and similarity >= 0.55, coverage, similarity
 
 
-def fuse_page(context: PageFusionContext, config: FusionConfig) -> tuple[list[dict], FusionMetrics]:
+def _effective_normalized_text(text: str) -> str:
+    """生成用于查找 VLM 顺序锚点的归一化文本。
+
+    这里会去掉空白并归一化标点/大小写，用于判断 native span 在 VLM 文本中的大致位置。
+    该字符串不用于最终输出，最终输出仍来自 native 或保守补入后的文本。
+    """
+    return "".join(
+        normalize_char(char)
+        for char in text or ""
+        if normalize_char(char).strip()
+    )
+
+
+def _join_spans_in_sequence(spans) -> str:
+    """按给定 span 顺序拼接 native 文本。
+
+    参数：
+    - spans: 已经排好顺序的 NativeSpan 列表。
+
+    返回：
+    - 拼接后的文本。若相邻 span 的 y 差超过上一 span 行高的 0.6 倍，先保留一个
+      ``\n``。后续 ``_soften_native_line_breaks_by_vlm`` 会根据 VLM 是否连续来软化它。
+    """
+    if not spans:
+        return ""
+    parts = []
+    prev = None
+    for span in spans:
+        if prev is not None:
+            prev_h = max(1.0, prev.bbox[3] - prev.bbox[1])
+            if abs(span.bbox[1] - prev.bbox[1]) > prev_h * 0.6:
+                parts.append("\n")
+        parts.append(span.content)
+        prev = span
+    return "".join(parts).strip()
+
+
+def _is_cjk_char(char: str) -> bool:
+    """判断字符是否属于 CJK，用于决定软换行处是否需要补空格。"""
+    return any(
+        "\u3400" <= item <= "\u4dbf"
+        or "\u4e00" <= item <= "\u9fff"
+        or "\uf900" <= item <= "\ufaff"
+        for item in char
+    )
+
+
+def _line_break_replacement(prev_char: str, next_char: str) -> str:
+    """决定 native 换行被软化后替换成什么。
+
+    中文/中文之间通常不需要空格；英文、数字或混合文本之间需要空格，避免单词粘连。
+    标点附近尽量不加空格，避免生成 ``你好 ，`` 这类文本。
+    """
+    if not prev_char or not next_char:
+        return ""
+    if _is_cjk_char(prev_char) and _is_cjk_char(next_char):
+        return ""
+    if next_char in "，。！？；：、,.!?;:)]}）】」』":
+        return ""
+    if prev_char in "([{（【「『":
+        return ""
+    return " "
+
+
+def _soften_native_line_breaks_by_vlm(text: str, vlm_text: str, config: FusionConfig) -> tuple[str, bool]:
+    """用 VLM 的连续文本判断 native 换行是否只是排版折行。
+
+    参数：
+    - text: 当前 bbox 内已经合并好的文本，通常来自 native。
+    - vlm_text: 同一 bbox 的 VLM 文本。
+    - config: 融合配置，``native_vlm_line_break_enable`` 可关闭该逻辑。
+
+    返回：
+    - (softened_text, changed)。如果 VLM 文本没有换行而 native 有换行，则把 native
+      的换行当作 soft break；如果 VLM 也有换行，则认为 VLM 也看到了结构性换行，不处理。
+    """
+    if not config.native_vlm_line_break_enable:
+        return text, False
+    if "\n" not in text or "\n" in (vlm_text or ""):
+        return text, False
+
+    chars = list(text)
+    parts = []
+    changed = False
+    for index, char in enumerate(chars):
+        if char != "\n":
+            parts.append(char)
+            continue
+        prev_char = next((item for item in reversed(chars[:index]) if not item.isspace()), "")
+        next_char = next((item for item in chars[index + 1:] if not item.isspace()), "")
+        parts.append(_line_break_replacement(prev_char, next_char))
+        changed = True
+    normalized = "".join(parts)
+    while "  " in normalized:
+        normalized = normalized.replace("  ", " ")
+    return normalized.strip(), changed
+
+
+def _span_vlm_position(span, vlm_norm: str, fallback_index: int) -> tuple[float, int]:
+    """估计 native span 在 VLM 文本中的位置。
+
+    参数：
+    - span: 当前 native span。
+    - vlm_norm: 去空白、归一化后的 VLM 文本。
+    - fallback_index: 找不到锚点时使用的原始顺序，保证排序稳定。
+
+    返回：
+    - (position, fallback_index)。position 越小越靠前；找不到时为 inf。
+
+    逻辑：
+    1. 先做精确子串匹配。
+    2. 单字符 span 做单字符查找。
+    3. 长 span 做滑动窗口相似度匹配，处理少量 VLM 错字/标点差异。
+    """
+    span_norm = _effective_normalized_text(span.content)
+    if not span_norm or not vlm_norm:
+        return (float("inf"), fallback_index)
+    exact = vlm_norm.find(span_norm)
+    if exact >= 0:
+        return (float(exact), fallback_index)
+    if len(span_norm) == 1:
+        single = vlm_norm.find(span_norm)
+        if single >= 0:
+            return (float(single), fallback_index)
+
+    best_pos = float("inf")
+    best_score = 0.0
+    window = max(1, len(span_norm))
+    for pos in range(0, max(1, len(vlm_norm) - window + 1)):
+        ratio = SequenceMatcher(None, span_norm, vlm_norm[pos: pos + window]).ratio()
+        if ratio > best_score:
+            best_score = ratio
+            best_pos = float(pos)
+    if best_score >= 0.75:
+        return (best_pos, fallback_index)
+    return (float("inf"), fallback_index)
+
+
+def _build_native_vlm_config(config: FusionConfig) -> CharAlignConfig:
+    """把页面级 FusionConfig 中的字符对齐参数转换成 CharAlignConfig。"""
+    return CharAlignConfig(
+        native_missing_max_run=config.native_vlm_missing_max_run,
+        native_missing_max_total_ratio=config.native_vlm_missing_max_total_ratio,
+        max_conflict_ratio=config.native_vlm_max_conflict_ratio,
+    )
+
+
+def _build_vlm_ordered_native_text(spans, native_text: str, vlm_text: str, config: FusionConfig):
+    """尝试按 VLM 阅读顺序重排 native spans。
+
+    参数：
+    - spans: 当前 bbox 匹配到的 native spans。
+    - native_text: 按几何顺序拼接的 native 文本。
+    - vlm_text: 同一 bbox 的 VLM 文本，作为阅读顺序参考。
+    - config: 控制是否启用、锚点覆盖率阈值、分数提升阈值等。
+
+    返回：
+    - (selected_text, debug, applied)。
+
+    只有当重排候选满足以下条件才应用：
+    - anchor_coverage >= native_vlm_anchor_coverage。
+    - conflict_ratio <= native_vlm_max_conflict_ratio。
+    - score_gain >= native_vlm_score_gain。
+
+    这保证 VLM 只指导顺序，不会在证据不足时带偏 native。
+    """
+    if not config.native_vlm_order_enable or len(spans) < 2 or not vlm_text.strip():
+        return native_text, None, False
+
+    vlm_norm = _effective_normalized_text(vlm_text)
+    ordered_spans = sorted(
+        enumerate(spans),
+        key=lambda item: _span_vlm_position(item[1], vlm_norm, item[0]),
+    )
+    reordered = [span for _, span in ordered_spans]
+    if [span.uid for span in reordered] == [span.uid for span in spans]:
+        return native_text, None, False
+
+    candidate_text = _join_spans_in_sequence(reordered)
+    base_alignment = align_native_with_vlm(native_text, vlm_text)
+    candidate_alignment = align_native_with_vlm(candidate_text, vlm_text)
+    score_gain = candidate_alignment.score - base_alignment.score
+
+    applied = (
+        candidate_alignment.anchor_coverage >= config.native_vlm_anchor_coverage
+        and candidate_alignment.conflict_ratio <= config.native_vlm_max_conflict_ratio
+        and score_gain >= config.native_vlm_score_gain
+    )
+    debug = {
+        "base_alignment": base_alignment.to_debug(),
+        "candidate_alignment": candidate_alignment.to_debug(),
+        "score_gain": round(score_gain, 6),
+        "candidate_text": candidate_text,
+    }
+    if applied:
+        return candidate_text, debug, True
+    return native_text, debug, False
+
+
+def _fuse_native_text_for_block(native_text: str, vlm_text: str, spans, config: FusionConfig):
+    """在单个 VLM bbox 内融合 native 文本和 VLM 文本。
+
+    参数：
+    - native_text: 当前 bbox 的 native 候选文本，可能已经包含 gap 识别补字。
+    - vlm_text: 当前 bbox 的 VLM 文本。
+    - spans: 当前 bbox 匹配到的 native spans，用于 VLM-guided span 重排。
+    - config: 融合阈值和开关。
+
+    返回：
+    - (final_text, debug, missing_filled_count, order_applied)。
+
+    处理顺序：
+    1. 用 VLM 文本尝试重排 native spans。
+    2. 做字符级对齐，只保守补 native 漏掉的普通文字。
+    3. 如果 VLM 认为该 bbox 是连续句子，则软化 native 的排版换行。
+    """
+    if not config.native_vlm_alignment_enable or not vlm_text.strip():
+        return native_text, {}, 0, False
+
+    ordered_text, order_debug, order_applied = _build_vlm_ordered_native_text(
+        spans,
+        native_text,
+        vlm_text,
+        config,
+    )
+    merge_result = merge_native_with_vlm(
+        ordered_text,
+        vlm_text,
+        _build_native_vlm_config(config),
+    )
+    merged_text, line_break_softened = _soften_native_line_breaks_by_vlm(
+        merge_result.text,
+        vlm_text,
+        config,
+    )
+    debug = {
+        "selected_native_text": ordered_text,
+        "merged_text": merged_text,
+        "merge_decision": merge_result.decision,
+        "line_break_softened": line_break_softened,
+        "alignment": merge_result.alignment.to_debug(),
+    }
+    if order_debug is not None:
+        debug["order"] = order_debug
+    return merged_text, debug, merge_result.filled_missing_count, order_applied
+
+
+def fuse_page(context: PageFusionContext, config: FusionConfig) -> tuple[list[dict], FusionMetrics, list[dict]]:
     """融合单页的 VLM 结果和 PDF 原生文本。
 
     决策优先级：
@@ -140,6 +395,7 @@ def fuse_page(context: PageFusionContext, config: FusionConfig) -> tuple[list[di
     )
 
     fused_blocks: list[dict] = []
+    compare_records: list[dict] = []
     locked_native_spans = []
     emitted_vlm_indices = set()
 
@@ -168,11 +424,23 @@ def fuse_page(context: PageFusionContext, config: FusionConfig) -> tuple[list[di
                     if block_gaps
                     else native_match.content
                 )
+                alignment_debug = {}
+                missing_filled_count = 0
+                order_applied = False
+                native_content, alignment_debug, missing_filled_count, order_applied = _fuse_native_text_for_block(
+                    native_content,
+                    vlm_content,
+                    native_match.spans,
+                    config,
+                )
                 for span in native_match.spans:
                     span.consumed = True
                 locked_native_spans.extend(native_match.spans)
                 emitted_vlm_indices.add(block.get("index", index + 1))
                 metrics.native_locked_count += 1
+                metrics.native_vlm_missing_filled_count += missing_filled_count
+                if order_applied:
+                    metrics.native_vlm_order_applied_count += 1
                 if vlm_content and text_similarity(native_match.content, vlm_content) < 0.55:
                     metrics.source_conflict_count += 1
                 fused_blocks.append(
@@ -184,8 +452,18 @@ def fuse_page(context: PageFusionContext, config: FusionConfig) -> tuple[list[di
                             "native_quality": native_match.quality,
                             "vlm_text": vlm_content,
                             "native_gap_count": len(block_gaps),
+                            "native_vlm_alignment": alignment_debug,
                         } if config.debug else None,
                     )
+                )
+                compare_records.append(
+                    {
+                        "page_index": context.page_index,
+                        "bbox_index": block.get("index", index + 1),
+                        "native_text": native_match.content,
+                        "vlm_text": vlm_content,
+                        "final_text": native_content,
+                    }
                 )
             else:
                 # 原生文本质量差或没有匹配内容时，回退到 VLM 识别文本。
@@ -203,6 +481,15 @@ def fuse_page(context: PageFusionContext, config: FusionConfig) -> tuple[list[di
                             "native_text": native_match.content,
                         } if config.debug else None,
                     )
+                )
+                compare_records.append(
+                    {
+                        "page_index": context.page_index,
+                        "bbox_index": block.get("index", index + 1),
+                        "native_text": native_match.content,
+                        "vlm_text": vlm_content,
+                        "final_text": vlm_content,
+                    }
                 )
         elif is_structural_type(block_type):
             # 表格、图片、公式、代码等结构类区域不做原生文本替换。
@@ -279,7 +566,8 @@ def fuse_page(context: PageFusionContext, config: FusionConfig) -> tuple[list[di
         next_index += 1
         metrics.native_recovered_count += 1
 
-    _sort_fused_blocks(fused_blocks, context.page_width, context.page_height)
+    if config.fusion_block_order_reference != "vlm":
+        _sort_fused_blocks(fused_blocks, context.page_width, context.page_height)
     for index, block in enumerate(fused_blocks):
         block["index"] = index + 1
-    return fused_blocks, metrics
+    return fused_blocks, metrics, compare_records
