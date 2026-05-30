@@ -1,14 +1,17 @@
 # Copyright (c) Opendatalab. All rights reserved.
 from __future__ import annotations
 
-from mineru.backend.vlm_fusion.block_builder import (
+import unicodedata
+
+from mineru.backend.vlm_native_correction.block_builder import (
     block_pdf_bbox,
     copy_model_block,
     is_structural_type,
     is_textual_type,
 )
-from mineru.backend.vlm_fusion.char_alignment import (
+from mineru.backend.vlm_native_correction.char_alignment import (
     CONFLICT,
+    CONTROL_OR_UNKNOWN,
     DIGIT,
     EQUIVALENT,
     LETTER_OR_CJK,
@@ -20,7 +23,7 @@ from mineru.backend.vlm_fusion.char_alignment import (
     align_native_with_vlm,
     effective_token_count,
 )
-from mineru.backend.vlm_fusion.native_text import build_native_match
+from mineru.backend.vlm_native_correction.native_text import build_native_match, join_native_spans_with_gaps
 from mineru.backend.vlm_native_correction.config import NativeCorrectionConfig
 from mineru.backend.vlm_native_correction.schemas import CorrectionMetrics, PageCorrectionContext
 
@@ -48,22 +51,31 @@ def correct_page(
         block_type = block.get("type", "text")
         block_bbox = block_pdf_bbox(block, context.page_width, context.page_height)
         native_match = build_native_match(block_bbox, context.native_spans, overlap_threshold=0.45)
+        block_gaps = [
+            gap for gap in context.native_gaps if gap.block_index == block.get("index", index + 1) and gap.content.strip()
+        ]
+        native_text = (
+            join_native_spans_with_gaps(native_match.spans, block_gaps)
+            if block_gaps
+            else native_match.content
+        )
         vlm_text = block.get("content") or ""
+        correctable = _is_correctable_text_block(block_type, block)
 
-        if not is_textual_type(block_type) or is_structural_type(block_type):
+        if not correctable:
             corrected = copy_model_block(block)
             corrected_blocks.append(corrected)
             final_text = corrected.get("content") or vlm_text
             debug = None
         elif not config.native_correction_enable or not vlm_text.strip():
-            final_text = vlm_text or native_match.content
-            if not vlm_text.strip() and native_match.content.strip():
+            final_text = vlm_text or native_text
+            if not vlm_text.strip() and native_text.strip():
                 metrics.vlm_fallback_count += 1
             debug = None
         else:
             result = correct_vlm_text_with_native(
                 vlm_text,
-                native_match.content,
+                native_text,
                 config,
             )
             final_text = result["text"]
@@ -74,27 +86,37 @@ def correct_page(
             if result["decision"] == "keep_vlm_conflict":
                 metrics.skipped_conflict_count += 1
             debug = result if config.debug else None
+        metrics.native_gap_count += len(
+            [gap for gap in context.native_gaps if gap.block_index == block.get("index", index + 1)]
+        )
+        metrics.native_gap_filled_count += sum(1 for gap in block_gaps if gap.content.strip())
 
-        if is_textual_type(block_type) and not is_structural_type(block_type):
+        if correctable:
             corrected = copy_model_block(block)
             corrected["content"] = final_text
             corrected["source"] = "vlm_native_corrected" if final_text != vlm_text else "vlm"
             if debug is not None:
                 corrected["_correction"] = debug
             corrected_blocks.append(corrected)
-        if native_match.content or vlm_text or final_text:
+        if native_text or vlm_text or final_text:
             compare_records.append(
                 {
                     "page_index": context.page_index,
                     "bbox_index": block.get("index", index + 1),
                     "block_type": block_type,
-                    "native_text": native_match.content,
+                    "native_text": native_text,
                     "vlm_text": vlm_text,
                     "final_text": final_text,
                 }
             )
 
     return corrected_blocks, metrics, compare_records
+
+
+def _is_correctable_text_block(block_type: str, block: dict) -> bool:
+    if is_textual_type(block_type) and not is_structural_type(block_type):
+        return True
+    return block_type == "image" and block.get("sub_type") == "text_image" and bool((block.get("content") or "").strip())
 
 
 def correct_vlm_text_with_native(
@@ -194,7 +216,9 @@ def _choose_native_replacement(native_char: str, vlm_char: str) -> str | None:
     vlm_type = _simple_char_type(vlm_char)
     if native_type == SPACE or vlm_type == SPACE:
         return None
-    if native_type in {LETTER_OR_CJK, DIGIT, PUNCT} and vlm_type in {LETTER_OR_CJK, DIGIT, PUNCT}:
+    if native_type == PUNCT and vlm_type == PUNCT:
+        return native_char
+    if native_type in {LETTER_OR_CJK, DIGIT} and _char_script_group(native_char) == _char_script_group(vlm_char):
         return native_char
     return None
 
@@ -314,15 +338,56 @@ def _simple_char_type(char: str) -> str:
         return SPACE
     if char.isdigit():
         return DIGIT
-    if char.isalpha() or _is_cjk(char):
+    if _is_common_text_letter(char):
         return LETTER_OR_CJK
+    if char.isalpha():
+        return CONTROL_OR_UNKNOWN
     if len(char) == 1 and not char.isalnum():
         return PUNCT
-    return PUNCT
+    return CONTROL_OR_UNKNOWN
 
 
 def _is_text_content_char(char: str) -> bool:
     return _simple_char_type(char) in {LETTER_OR_CJK, DIGIT}
+
+
+def _char_script_group(char: str) -> str:
+    if not char:
+        return CONTROL_OR_UNKNOWN
+    if char.isdigit():
+        return DIGIT
+    if _is_cjk(char):
+        return "CJK"
+    if _is_latin(char):
+        return "LATIN"
+    if _is_hiragana_or_katakana(char):
+        return "KANA"
+    if _is_hangul(char):
+        return "HANGUL"
+    if len(char) == 1 and not char.isalnum():
+        return PUNCT
+    return CONTROL_OR_UNKNOWN
+
+
+def _is_common_text_letter(char: str) -> bool:
+    return _is_cjk(char) or _is_latin(char) or _is_hiragana_or_katakana(char) or _is_hangul(char)
+
+
+def _is_latin(char: str) -> bool:
+    return char.isalpha() and "LATIN" in unicodedata.name(char, "")
+
+
+def _is_hiragana_or_katakana(char: str) -> bool:
+    return (
+        "\u3040" <= char <= "\u309f"
+        or "\u30a0" <= char <= "\u30ff"
+        or "\u31f0" <= char <= "\u31ff"
+        or "\uff66" <= char <= "\uff9f"
+    )
+
+
+def _is_hangul(char: str) -> bool:
+    return "\uac00" <= char <= "\ud7af" or "\u1100" <= char <= "\u11ff"
 
 
 def _has_vlm_anchor_before(ops, index: int) -> bool:

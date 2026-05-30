@@ -7,8 +7,8 @@ from difflib import SequenceMatcher
 
 from loguru import logger
 
-from mineru.backend.vlm_fusion.bbox import center_in_bbox, intersection_area, reading_order_key
-from mineru.backend.vlm_fusion.schemas import BBox, NativeGap, NativeMatch, NativeSpan
+from mineru.backend.vlm_native_correction.bbox import center_in_bbox, intersection_area, reading_order_key
+from mineru.backend.vlm_native_correction.schemas import BBox, NativeGap, NativeMatch, NativeSpan
 from mineru.utils.pdf_text_tool import get_lines_from_chars, get_page_chars
 
 
@@ -308,12 +308,14 @@ def detect_native_gaps_for_block(
             gap_width = right.bbox[0] - left.bbox[2]
             left_text = left.content.strip()
             right_text = right.content.strip()
+            left_char_width = (left.bbox[2] - left.bbox[0]) / max(1, len(left_text))
+            right_char_width = (right.bbox[2] - right.bbox[0]) / max(1, len(right_text))
+            local_char_width = max(1.0, min(left_char_width, right_char_width, median_char_width))
             pair_gap_threshold = gap_threshold
             if min(len(left_text), len(right_text)) <= 2:
                 # 短 span 旁边常出现图片化字或装饰字。这里用左右 span 中更小的
                 # 字符宽度估算局部阈值，降低漏检概率，同时仍保留 min_width 下限。
                 left_char_width = (left.bbox[2] - left.bbox[0]) / max(1, len(left_text))
-                right_char_width = (right.bbox[2] - right.bbox[0]) / max(1, len(right_text))
                 short_span_threshold = max(min_width, min(left_char_width, right_char_width) * 2.0)
                 pair_gap_threshold = min(pair_gap_threshold, short_span_threshold)
             if gap_width < pair_gap_threshold:
@@ -333,6 +335,7 @@ def detect_native_gaps_for_block(
                     block_index=block_index,
                     left_span_uid=left.uid,
                     right_span_uid=right.uid,
+                    max_chars=max(1, round(gap_width / local_char_width)),
                 )
             )
     return gaps

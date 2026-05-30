@@ -65,3 +65,14 @@ def test_vlm_primary_rejects_large_native_missing_text_when_conflicted():
 
     assert result["text"] == "开头X结尾"
     assert result["decision"] == "keep_vlm_conflict"
+
+
+def test_vlm_primary_does_not_replace_vlm_with_suspicious_native_script():
+    result = correct_vlm_text_with_native(
+        "\u7406\u89e3\u63d0\u51fa\u4e86\u8003\u9a8c",
+        "\u7406\u89e3\u1a00\u51fa\u4e86\u8003\u9a8c",
+        NativeCorrectionConfig(),
+    )
+
+    assert result["text"] == "\u7406\u89e3\u63d0\u51fa\u4e86\u8003\u9a8c"
+    assert result["corrected_char_count"] == 0

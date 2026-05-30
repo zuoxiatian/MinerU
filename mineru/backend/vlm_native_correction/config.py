@@ -40,6 +40,11 @@ class NativeCorrectionConfig:
       alignment has low conflict and stable anchors on both sides.
     - large_missing_max_conflict_ratio: maximum conflict ratio allowed for long
       native-only fills.
+    - native_gap_enable: detect image-based Chinese text gaps between native spans.
+    - native_gap_width_ratio: gap threshold in character-width multiples.
+    - native_gap_min_width: absolute minimum gap width.
+    - native_gap_crop_padding_ratio: crop padding by line height.
+    - native_gap_max_chars: maximum recognized Chinese chars for one gap.
     """
     debug: bool = False
     native_correction_enable: bool = True
@@ -50,6 +55,11 @@ class NativeCorrectionConfig:
     missing_max_total_ratio: float = 0.05
     allow_large_missing_fill: bool = True
     large_missing_max_conflict_ratio: float = 0.05
+    native_gap_enable: bool = True
+    native_gap_width_ratio: float = 1.0
+    native_gap_min_width: float = 8.0
+    native_gap_crop_padding_ratio: float = 0.8
+    native_gap_max_chars: int = 8
 
 
 def get_correction_config() -> NativeCorrectionConfig:
@@ -66,4 +76,9 @@ def get_correction_config() -> NativeCorrectionConfig:
             "MINERU_VLM_NATIVE_CORRECTION_LARGE_MISSING_MAX_CONFLICT_RATIO",
             0.05,
         ),
+        native_gap_enable=_env_bool("MINERU_VLM_NATIVE_CORRECTION_GAP_ENABLE", True),
+        native_gap_width_ratio=_env_float("MINERU_VLM_NATIVE_CORRECTION_GAP_WIDTH_RATIO", 1.0),
+        native_gap_min_width=_env_float("MINERU_VLM_NATIVE_CORRECTION_GAP_MIN_WIDTH", 8.0),
+        native_gap_crop_padding_ratio=_env_float("MINERU_VLM_NATIVE_CORRECTION_GAP_CROP_PADDING_RATIO", 0.8),
+        native_gap_max_chars=max(1, int(_env_float("MINERU_VLM_NATIVE_CORRECTION_GAP_MAX_CHARS", 8))),
     )
