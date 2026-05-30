@@ -76,3 +76,18 @@ def test_vlm_primary_does_not_replace_vlm_with_suspicious_native_script():
 
     assert result["text"] == "\u7406\u89e3\u63d0\u51fa\u4e86\u8003\u9a8c"
     assert result["corrected_char_count"] == 0
+
+
+def test_vlm_primary_keeps_vlm_when_native_has_same_content_wrong_order():
+    vlm_text = "\u6211\u4eec\u5e2e\u5b83\u53d6\u540d\u5b57\n\u597d\u4e0d\u597d\uff1f\n\u597d\u554a\u3002"
+    native_text = "\u6211\u4eec\u5e2e\u5b83\u53d6\u540d\u5b57\u597d\u554a\u3002\n\u597d\u4e0d\u597d\uff1f"
+
+    result = correct_vlm_text_with_native(
+        vlm_text,
+        native_text,
+        NativeCorrectionConfig(),
+    )
+
+    assert result["text"] == vlm_text
+    assert result["decision"] == "keep_vlm_order_conflict"
+    assert result["inserted_char_count"] == 0

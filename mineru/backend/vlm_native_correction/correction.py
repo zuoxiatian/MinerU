@@ -1,6 +1,7 @@
 # Copyright (c) Opendatalab. All rights reserved.
 from __future__ import annotations
 
+from collections import Counter
 import unicodedata
 
 from mineru.backend.vlm_native_correction.block_builder import (
@@ -83,7 +84,7 @@ def correct_page(
             metrics.native_inserted_char_count += result["inserted_char_count"]
             if result["corrected_char_count"] or result["inserted_char_count"]:
                 metrics.corrected_block_count += 1
-            if result["decision"] == "keep_vlm_conflict":
+            if result["decision"] in {"keep_vlm_conflict", "keep_vlm_order_conflict"}:
                 metrics.skipped_conflict_count += 1
             debug = result if config.debug else None
         metrics.native_gap_count += len(
@@ -136,6 +137,9 @@ def correct_vlm_text_with_native(
         return _result(vlm_text, "vlm_no_native")
 
     alignment = align_native_with_vlm(native_text, vlm_text)
+    if _has_same_content_different_order(native_text, vlm_text):
+        return _result(vlm_text, "keep_vlm_order_conflict", alignment=alignment)
+
     content_stats = _content_alignment_stats(alignment)
     if content_stats["anchor_coverage"] < config.min_anchor_coverage and not (
         _can_correct_low_anchor_conflicts(content_stats) or _can_fill_large_native_missing(alignment, content_stats, config)
@@ -179,6 +183,8 @@ def correct_vlm_text_with_native(
                 idx += 1
             run = ops[run_start:idx]
             run_text = "".join(item.native for item in run if _can_insert_native_extra(item))
+            if _native_extra_exists_as_vlm_missing(ops, run_text, run_start, idx):
+                continue
             if _can_insert_native_run(
                 run_text,
                 inserted,
@@ -331,6 +337,40 @@ def _allows_large_missing_fill(content_stats: dict, config: NativeCorrectionConf
 
 def _can_insert_native_extra(op) -> bool:
     return _simple_char_type(op.native) == LETTER_OR_CJK
+
+
+def _has_same_content_different_order(native_text: str, vlm_text: str) -> bool:
+    native_content = _content_text(native_text)
+    vlm_content = _content_text(vlm_text)
+    return bool(
+        native_content
+        and vlm_content
+        and native_content != vlm_content
+        and Counter(native_content) == Counter(vlm_content)
+    )
+
+
+def _native_extra_exists_as_vlm_missing(ops, run_text: str, run_start: int, run_end: int) -> bool:
+    if not run_text:
+        return False
+    idx = 0
+    while idx < len(ops):
+        if run_start <= idx < run_end or ops[idx].op_type != NATIVE_MISSING:
+            idx += 1
+            continue
+        missing_start = idx
+        while idx < len(ops) and ops[idx].op_type == NATIVE_MISSING:
+            idx += 1
+        if missing_start == run_start:
+            continue
+        missing_text = "".join(item.vlm for item in ops[missing_start:idx] if _is_text_content_char(item.vlm))
+        if missing_text == run_text:
+            return True
+    return False
+
+
+def _content_text(text: str) -> str:
+    return "".join(char for char in text or "" if _is_text_content_char(char))
 
 
 def _simple_char_type(char: str) -> str:
