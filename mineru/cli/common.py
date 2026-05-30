@@ -209,10 +209,10 @@ def _prepare_pdf_bytes(pdf_bytes_list, start_page_id, end_page_id):
 
 
 def _extract_bbox_text_compare(model_output):
-    """从 VLM fusion 的 model_output 中提取 bbox 文本对比记录。
+    """从 VLM fusion/native correction 的 model_output 中提取 bbox 文本对比记录。
 
     参数：
-    - model_output: analyze 阶段返回的调试输出。只有 VLM fusion 后端会包含
+    - model_output: analyze 阶段返回的调试输出。VLM fusion/native correction 后端会包含
       ``bbox_text_compare``。
 
     返回：
@@ -229,15 +229,16 @@ def _extract_bbox_text_compare(model_output):
         for record in page.get("bbox_text_compare") or []:
             if not isinstance(record, dict):
                 continue
-            records.append(
-                {
-                    "page_index": record.get("page_index"),
-                    "bbox_index": record.get("bbox_index"),
-                    "native_text": record.get("native_text", ""),
-                    "vlm_text": record.get("vlm_text", ""),
-                    "final_text": record.get("final_text", ""),
-                }
-            )
+            item = {
+                "page_index": record.get("page_index"),
+                "bbox_index": record.get("bbox_index"),
+                "native_text": record.get("native_text", ""),
+                "vlm_text": record.get("vlm_text", ""),
+                "final_text": record.get("final_text", ""),
+            }
+            if "block_type" in record:
+                item["block_type"] = record.get("block_type")
+            records.append(item)
     return records
 
 
@@ -431,16 +432,22 @@ async def _async_process_vlm(
 ):
     """异步处理VLM后端逻辑"""
     vlm_text_source = kwargs.pop("vlm_text_source", None)
+    use_native_correction = (
+        str(vlm_text_source or "").lower() in {"native_correction", "correction"}
+        or os.getenv("MINERU_VLM_TEXT_SOURCE", "").lower() in {"native_correction", "correction"}
+    )
     use_fusion = (
         str(vlm_text_source or "").lower() == "fusion"
         or os.getenv("MINERU_VLM_TEXT_SOURCE", "").lower() == "fusion"
     )
-    parse_method = "vlm_fusion" if use_fusion else "vlm"
+    parse_method = "vlm_native_correction" if use_native_correction else ("vlm_fusion" if use_fusion else "vlm")
     f_draw_span_bbox = False
     if not backend.endswith("client"):
         server_url = None
     analyze_func = aio_vlm_doc_analyze
-    if use_fusion:
+    if use_native_correction:
+        from mineru.backend.vlm_native_correction.analyze import aio_doc_analyze as analyze_func
+    elif use_fusion:
         from mineru.backend.vlm_fusion.analyze import aio_doc_analyze as analyze_func
 
     for idx, pdf_bytes in enumerate(pdf_bytes_list):
@@ -480,16 +487,22 @@ def _process_vlm(
 ):
     """同步处理VLM后端逻辑"""
     vlm_text_source = kwargs.pop("vlm_text_source", None)
+    use_native_correction = (
+        str(vlm_text_source or "").lower() in {"native_correction", "correction"}
+        or os.getenv("MINERU_VLM_TEXT_SOURCE", "").lower() in {"native_correction", "correction"}
+    )
     use_fusion = (
         str(vlm_text_source or "").lower() == "fusion"
         or os.getenv("MINERU_VLM_TEXT_SOURCE", "").lower() == "fusion"
     )
-    parse_method = "vlm_fusion" if use_fusion else "vlm"
+    parse_method = "vlm_native_correction" if use_native_correction else ("vlm_fusion" if use_fusion else "vlm")
     f_draw_span_bbox = False
     if not backend.endswith("client"):
         server_url = None
     analyze_func = vlm_doc_analyze
-    if use_fusion:
+    if use_native_correction:
+        from mineru.backend.vlm_native_correction.analyze import doc_analyze as analyze_func
+    elif use_fusion:
         from mineru.backend.vlm_fusion.analyze import doc_analyze as analyze_func
 
     for idx, pdf_bytes in enumerate(pdf_bytes_list):
@@ -727,6 +740,9 @@ def do_parse(
         )
     else:
         vlm_text_source = kwargs.pop("vlm_text_source", None)
+        if backend.startswith("vlm-native-correction-"):
+            vlm_text_source = "native_correction"
+            backend = "vlm-" + backend[len("vlm-native-correction-"):]
         if backend.startswith("vlm-fusion-"):
             vlm_text_source = "fusion"
             backend = "vlm-" + backend[len("vlm-fusion-"):]
@@ -827,6 +843,9 @@ async def aio_do_parse(
         )
     else:
         vlm_text_source = kwargs.pop("vlm_text_source", None)
+        if backend.startswith("vlm-native-correction-"):
+            vlm_text_source = "native_correction"
+            backend = "vlm-" + backend[len("vlm-native-correction-"):]
         if backend.startswith("vlm-fusion-"):
             vlm_text_source = "fusion"
             backend = "vlm-" + backend[len("vlm-fusion-"):]

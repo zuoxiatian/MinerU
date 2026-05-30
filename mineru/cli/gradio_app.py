@@ -226,6 +226,7 @@ STATUS_QUEUED_LOCALLY_PREFIX = "Queued locally:"
 BACKEND_CHOICE_DEFINITIONS = [
     "pipeline",
     "vlm-auto-engine",
+    "vlm-native-correction-auto-engine",
     "vlm-fusion-auto-engine",
     "hybrid-auto-engine",
 ]
@@ -1499,6 +1500,7 @@ def main(ctx,
             "backend_label_hybrid": "Hybrid (Recommended)",
             "backend_label_pipeline": "Pipeline (Stable multilingual)",
             "backend_label_vlm": "VLM (High-precision Chinese/English)",
+            "backend_label_vlm_native_correction": "VLM Native Correction (Experimental)",
             "backend_label_vlm_fusion": "VLM Fusion (Experimental)",
             "backend_label_remote_vlm": "Remote VLM",
             "backend_label_remote_hybrid": "Remote Hybrid",
@@ -1547,6 +1549,7 @@ def main(ctx,
             "office_preview_ignore_once": "Dismiss",
             "office_preview_ignore_forever": "Always dismiss",
             "backend_info_vlm": "High-precision parsing via VLM, supports Chinese and English documents only.",
+            "backend_info_vlm_native_correction": "Experimental VLM-primary parsing: keeps VLM layout and corrects bbox text with PDF native text.",
             "backend_info_vlm_fusion": "Experimental layout-first VLM fusion: preserves reliable PDF text and supplements visual text.",
             "backend_info_pipeline": "Traditional Multi-model pipeline parsing, supports multiple languages, hallucination-free.",
             "backend_info_hybrid": "High-precision hybrid parsing, supports multiple languages.",
@@ -1645,6 +1648,8 @@ def main(ctx,
             return ""
 
     def get_backend_info(backend_choice):
+        if backend_choice.startswith("vlm-native-correction"):
+            return "VLM 为主解析，保留 VLM 版式，并按 bbox 用 PDF 原生文本校正文字符。"
         if backend_choice.startswith("vlm-fusion"):
             return i18n("backend_info_vlm_fusion")
         if backend_choice.startswith("vlm"):
