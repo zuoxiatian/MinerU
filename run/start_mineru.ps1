@@ -4,7 +4,8 @@ param(
     [int]$ApiPort = 8000,
     [string]$CondaEnv = "mineru",
     [string]$CondaExe = "C:\Users\LZ-DSJ-01\miniconda3\Scripts\conda.exe",
-    [string]$CudaPath = "C:\Users\LZ-DSJ-01\miniconda3\envs\mineru\Library"
+    [string]$CudaPath = "C:\Users\LZ-DSJ-01\miniconda3\envs\mineru\Library",
+    [switch]$KeepExisting
 )
 
 $ErrorActionPreference = "Stop"
@@ -16,6 +17,21 @@ $PidDir = Join-Path $RunDir "pids"
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 New-Item -ItemType Directory -Force -Path $PidDir | Out-Null
+
+function Stop-PortListeners {
+    param([int[]]$Ports)
+    foreach ($port in $Ports) {
+        $connections = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
+        foreach ($connection in $connections) {
+            $pidValue = [int]$connection.OwningProcess
+            if ($pidValue -le 0) {
+                continue
+            }
+            Write-Host "Stopping existing listener on port $port. PID=$pidValue"
+            & taskkill.exe /PID $pidValue /T /F | Out-Null
+        }
+    }
+}
 
 function Start-MinerUProcess {
     param(
@@ -55,6 +71,11 @@ $gradioOut = Join-Path $LogDir "gradio.out.log"
 $gradioErr = Join-Path $LogDir "gradio.err.log"
 $apiOut = Join-Path $LogDir "api.out.log"
 $apiErr = Join-Path $LogDir "api.err.log"
+
+if (-not $KeepExisting) {
+    Stop-PortListeners -Ports @($GradioPort, $ApiPort)
+    Start-Sleep -Seconds 1
+}
 
 Start-MinerUProcess `
     -Name "MinerU Gradio" `

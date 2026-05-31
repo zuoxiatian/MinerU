@@ -35,6 +35,15 @@ class PageClassifyResult:
     reason: str
 
 
+@dataclass(frozen=True)
+class PageLayoutResult:
+    flow: str
+    source: str
+    reading_order: str
+    columns: list[dict]
+    reason: str
+
+
 def classify_layout_blocks(
     layout_blocks: list[Any],
     *,
@@ -83,6 +92,65 @@ def classify_layout_blocks(
     )
 
 
+def analyze_layout_flow(
+    layout_blocks: list[Any],
+    *,
+    page_width: int | float,
+    page_height: int | float,
+    reading_order: str = "left_to_right",
+) -> PageLayoutResult:
+    candidates = _layout_flow_candidates(layout_blocks, page_width, page_height)
+    if len(candidates) < 4:
+        return PageLayoutResult(
+            flow="single_column",
+            source="vlm_layout",
+            reading_order=reading_order,
+            columns=[],
+            reason="not_enough_vlm_blocks",
+        )
+
+    left = [item for item in candidates if item["center_x"] <= float(page_width) * 0.5]
+    right = [item for item in candidates if item["center_x"] > float(page_width) * 0.5]
+    if len(left) < 2 or len(right) < 2:
+        return PageLayoutResult(
+            flow="single_column",
+            source="vlm_layout",
+            reading_order=reading_order,
+            columns=[],
+            reason="unbalanced_vlm_blocks",
+        )
+
+    left_column = _column_record(1, left, page_width, page_height)
+    right_column = _column_record(2, right, page_width, page_height)
+    center_gap = right_column["center_x"] - left_column["center_x"]
+    min_center_gap = float(page_width) * 0.25
+    y_overlap = _range_overlap_ratio(
+        [left_column["bbox"][1], left_column["bbox"][3]],
+        [right_column["bbox"][1], right_column["bbox"][3]],
+    )
+    if center_gap < min_center_gap or y_overlap < 0.25:
+        return PageLayoutResult(
+            flow="single_column",
+            source="vlm_layout",
+            reading_order=reading_order,
+            columns=[],
+            reason="weak_column_geometry",
+        )
+
+    columns = [left_column, right_column]
+    if reading_order == "right_to_left":
+        columns = [right_column, left_column]
+        columns = [dict(column, index=index) for index, column in enumerate(columns, start=1)]
+
+    return PageLayoutResult(
+        flow="double_column",
+        source="vlm_layout",
+        reading_order=reading_order,
+        columns=columns,
+        reason="vlm_blocks_split_by_page_center",
+    )
+
+
 def _block_to_dict(block: Any) -> dict:
     if isinstance(block, dict):
         return block
@@ -113,3 +181,83 @@ def _bbox_area_ratio(
         page_area = max(1.0, float(page_width) * float(page_height))
     area = max(0.0, x1 - x0) * max(0.0, y1 - y0)
     return min(1.0, area / page_area)
+
+
+def _layout_flow_candidates(
+    layout_blocks: list[Any],
+    page_width: int | float,
+    page_height: int | float,
+) -> list[dict]:
+    candidates = []
+    for raw_block in layout_blocks or []:
+        block = _block_to_dict(raw_block)
+        block_type = str(block.get("type") or "").lower()
+        bbox = _to_pdf_bbox(block.get("bbox"), page_width, page_height)
+        if bbox is None:
+            continue
+        area_ratio = _bbox_area_ratio(block.get("bbox"), page_width, page_height)
+        if block_type in IMAGE_TYPES and area_ratio >= 0.75:
+            continue
+        if block_type not in TEXT_TYPES and block_type not in IMAGE_TYPES:
+            continue
+        candidates.append(
+            {
+                "type": block_type,
+                "bbox": bbox,
+                "center_x": (bbox[0] + bbox[2]) / 2,
+                "center_y": (bbox[1] + bbox[3]) / 2,
+            }
+        )
+    return candidates
+
+
+def _to_pdf_bbox(
+    bbox,
+    page_width: int | float,
+    page_height: int | float,
+) -> list[float] | None:
+    if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+        return None
+    try:
+        x0, y0, x1, y1 = [float(value) for value in bbox]
+    except (TypeError, ValueError):
+        return None
+    if max(abs(x0), abs(y0), abs(x1), abs(y1)) <= 1.5:
+        return [
+            x0 * float(page_width),
+            y0 * float(page_height),
+            x1 * float(page_width),
+            y1 * float(page_height),
+        ]
+    return [x0, y0, x1, y1]
+
+
+def _column_record(
+    index: int,
+    blocks: list[dict],
+    page_width: int | float,
+    page_height: int | float,
+) -> dict:
+    x0 = min(item["bbox"][0] for item in blocks)
+    y0 = min(item["bbox"][1] for item in blocks)
+    x1 = max(item["bbox"][2] for item in blocks)
+    y1 = max(item["bbox"][3] for item in blocks)
+    bbox = [x0, y0, x1, y1]
+    return {
+        "index": index,
+        "bbox": bbox,
+        "normalized_bbox": [
+            round(x0 / max(1.0, float(page_width)), 6),
+            round(y0 / max(1.0, float(page_height)), 6),
+            round(x1 / max(1.0, float(page_width)), 6),
+            round(y1 / max(1.0, float(page_height)), 6),
+        ],
+        "center_x": (x0 + x1) / 2,
+        "count": len(blocks),
+    }
+
+
+def _range_overlap_ratio(left: list[float], right: list[float]) -> float:
+    overlap = max(0.0, min(left[1], right[1]) - max(left[0], right[0]))
+    smaller = max(1.0, min(left[1] - left[0], right[1] - right[0]))
+    return overlap / smaller

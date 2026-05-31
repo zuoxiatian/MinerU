@@ -34,6 +34,7 @@ def extract_ocr_text_blocks(
     language: str | None = None,
     max_vertical_gap_px: float | None = None,
     min_x_overlap_ratio: float | None = None,
+    layout_hint: dict | None = None,
 ) -> tuple[list[dict], dict]:
     records = detect_ocr_records(image, language=language)
     merged_records = merge_adjacent_records(
@@ -42,6 +43,7 @@ def extract_ocr_text_blocks(
         float(min_x_overlap_ratio if min_x_overlap_ratio is not None else os.getenv("MINERU_VLM_OCR_NATIVE_MIN_X_OVERLAP", 0.25)),
         image.size,
     )
+    merged_records = _sort_merged_records_by_layout_hint(merged_records, scale, layout_hint)
 
     blocks = []
     raw_by_index = {record["index"]: record for record in records}
@@ -68,6 +70,7 @@ def extract_ocr_text_blocks(
         "merged_count": len(merged_records),
         "raw_regions": records,
         "merged_regions": merged_records,
+        "layout_hint": layout_hint or {},
     }
     return blocks, debug
 
@@ -229,6 +232,46 @@ def merge_adjacent_records(
             }
         )
     return merged_records
+
+
+def _sort_merged_records_by_layout_hint(
+    records: list[dict],
+    scale: float,
+    layout_hint: dict | None,
+) -> list[dict]:
+    if not records:
+        return records
+    if not isinstance(layout_hint, dict) or layout_hint.get("flow") != "double_column":
+        return records
+    columns = layout_hint.get("columns") or []
+    if len(columns) < 2:
+        return records
+
+    column_centers = []
+    for order, column in enumerate(columns):
+        bbox = column.get("bbox") if isinstance(column, dict) else None
+        if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+            continue
+        column_centers.append((order, (float(bbox[0]) + float(bbox[2])) / 2))
+    if len(column_centers) < 2:
+        return records
+
+    safe_scale = max(scale, 1e-6)
+
+    def sort_key(record: dict):
+        bbox = record.get("bbox") or [0, 0, 0, 0]
+        pdf_center_x = ((float(bbox[0]) + float(bbox[2])) / 2) / safe_scale
+        column_order = min(column_centers, key=lambda item: abs(pdf_center_x - item[1]))[0]
+        return (column_order, float(bbox[1]), float(bbox[0]))
+
+    sorted_records = sorted(records, key=sort_key)
+    return [
+        {
+            **record,
+            "index": index,
+        }
+        for index, record in enumerate(sorted_records, start=1)
+    ]
 
 
 def _join_child_text(children: list[dict]) -> str:

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 
 import pypdfium2 as pdfium
@@ -35,7 +36,7 @@ from mineru.backend.vlm_ocr_native.middle_json import (
     init_middle_json,
 )
 from mineru.backend.vlm_ocr_native.ocr_text_regions import extract_ocr_text_blocks
-from mineru.backend.vlm_ocr_native.page_classifier import classify_layout_blocks
+from mineru.backend.vlm_ocr_native.page_classifier import analyze_layout_flow, classify_layout_blocks
 from mineru.backend.vlm_ocr_native.schemas import PageCorrectionContext
 from mineru.data.data_reader_writer import DataWriter
 from mineru.utils.config_reader import get_processing_window_size
@@ -213,12 +214,14 @@ def _extend_model_output(
     page_classifications=None,
     page_modes=None,
     ocr_debug_list=None,
+    page_layouts=None,
 ):
     native_gaps_list = native_gaps_list or [[] for _ in corrected_blocks_list]
     page_classifications = page_classifications or [None] * len(corrected_blocks_list)
     page_modes = page_modes or ["vlm"] * len(corrected_blocks_list)
     ocr_debug_list = ocr_debug_list or [None] * len(corrected_blocks_list)
-    for layout, vlm, corrected, compare_records, native_gaps, metrics, classification, page_mode, ocr_debug in zip(
+    page_layouts = page_layouts or [None] * len(corrected_blocks_list)
+    for layout, vlm, corrected, compare_records, native_gaps, metrics, classification, page_mode, ocr_debug, page_layout in zip(
         layout_results,
         vlm_results,
         corrected_blocks_list,
@@ -228,8 +231,10 @@ def _extend_model_output(
         page_classifications,
         page_modes,
         ocr_debug_list,
+        page_layouts,
     ):
         item = {
+            "model_output_version": "vlm_ocr_native_layout_v1",
             "layout": [dict(block) for block in layout],
             "vlm": [dict(block) for block in vlm],
             "corrected": corrected,
@@ -240,6 +245,8 @@ def _extend_model_output(
         item["page_mode"] = page_mode
         if classification is not None:
             item["page_classification"] = classification.__dict__
+        if page_layout is not None:
+            item["page_layout"] = page_layout.__dict__
         if ocr_debug is not None:
             item["ocr"] = ocr_debug
         model_output.append(item)
@@ -255,8 +262,10 @@ def _build_window_vlm_or_ocr_results(
     vlm_results = [None] * len(images_list)
     page_modes = ["vlm"] * len(images_list)
     page_classifications = []
+    page_layouts = []
     ocr_debug_list = [None] * len(images_list)
     normal_indices = []
+    reading_order = os.getenv("MINERU_VLM_OCR_NATIVE_READING_ORDER", "left_to_right")
 
     for index, (image_dict, layout_blocks) in enumerate(zip(images_list, layout_results)):
         page_image = image_dict["img_pil"]
@@ -269,7 +278,14 @@ def _build_window_vlm_or_ocr_results(
             page_width=pdf_width,
             page_height=pdf_height,
         )
+        page_layout = analyze_layout_flow(
+            layout_blocks,
+            page_width=pdf_width,
+            page_height=pdf_height,
+            reading_order=reading_order,
+        )
         page_classifications.append(classification)
+        page_layouts.append(page_layout)
         if classification.is_comic_like:
             page_modes[index] = "ocr"
             blocks, debug = extract_ocr_text_blocks(
@@ -278,6 +294,7 @@ def _build_window_vlm_or_ocr_results(
                 page_width=pdf_width,
                 page_height=pdf_height,
                 language=ocr_language,
+                layout_hint=page_layout.__dict__,
             )
             vlm_results[index] = blocks
             ocr_debug_list[index] = debug
@@ -296,7 +313,7 @@ def _build_window_vlm_or_ocr_results(
         for index, result in zip(normal_indices, normal_results):
             vlm_results[index] = result
 
-    return vlm_results, page_modes, page_classifications, ocr_debug_list
+    return vlm_results, page_modes, page_classifications, ocr_debug_list, page_layouts
 
 
 async def _aio_build_window_vlm_or_ocr_results(
@@ -309,8 +326,10 @@ async def _aio_build_window_vlm_or_ocr_results(
     vlm_results = [None] * len(images_list)
     page_modes = ["vlm"] * len(images_list)
     page_classifications = []
+    page_layouts = []
     ocr_debug_list = [None] * len(images_list)
     normal_indices = []
+    reading_order = os.getenv("MINERU_VLM_OCR_NATIVE_READING_ORDER", "left_to_right")
 
     for index, (image_dict, layout_blocks) in enumerate(zip(images_list, layout_results)):
         page_image = image_dict["img_pil"]
@@ -323,7 +342,14 @@ async def _aio_build_window_vlm_or_ocr_results(
             page_width=pdf_width,
             page_height=pdf_height,
         )
+        page_layout = analyze_layout_flow(
+            layout_blocks,
+            page_width=pdf_width,
+            page_height=pdf_height,
+            reading_order=reading_order,
+        )
         page_classifications.append(classification)
+        page_layouts.append(page_layout)
         if classification.is_comic_like:
             page_modes[index] = "ocr"
             blocks, debug = await asyncio.to_thread(
@@ -333,6 +359,7 @@ async def _aio_build_window_vlm_or_ocr_results(
                 page_width=pdf_width,
                 page_height=pdf_height,
                 language=ocr_language,
+                layout_hint=page_layout.__dict__,
             )
             vlm_results[index] = blocks
             ocr_debug_list[index] = debug
@@ -351,7 +378,7 @@ async def _aio_build_window_vlm_or_ocr_results(
         for index, result in zip(normal_indices, normal_results):
             vlm_results[index] = result
 
-    return vlm_results, page_modes, page_classifications, ocr_debug_list
+    return vlm_results, page_modes, page_classifications, ocr_debug_list, page_layouts
 
 
 def doc_analyze(
@@ -404,6 +431,7 @@ def doc_analyze(
                             page_modes,
                             page_classifications,
                             ocr_debug_list,
+                            page_layouts,
                         ) = _build_window_vlm_or_ocr_results(
                             predictor,
                             images_list,
@@ -443,6 +471,7 @@ def doc_analyze(
                         page_classifications,
                         page_modes,
                         ocr_debug_list,
+                        page_layouts,
                     )
                     if progress_bar is None:
                         progress_bar = tqdm(total=page_count, desc="Processing pages")
@@ -526,6 +555,7 @@ async def aio_doc_analyze(
                         page_modes,
                         page_classifications,
                         ocr_debug_list,
+                        page_layouts,
                     ) = await _aio_build_window_vlm_or_ocr_results(
                         predictor,
                         images_list,
@@ -566,6 +596,7 @@ async def aio_doc_analyze(
                         page_classifications,
                         page_modes,
                         ocr_debug_list,
+                        page_layouts,
                     )
                     if progress_bar is None:
                         progress_bar = tqdm(total=page_count, desc="Processing pages")
