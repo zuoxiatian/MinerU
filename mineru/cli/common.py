@@ -238,6 +238,10 @@ def _extract_bbox_text_compare(model_output):
             }
             if "block_type" in record:
                 item["block_type"] = record.get("block_type")
+            if "text_source" in record:
+                item["text_source"] = record.get("text_source")
+            if "final_source" in record:
+                item["final_source"] = record.get("final_source")
             records.append(item)
     return records
 
@@ -428,6 +432,7 @@ async def _async_process_vlm(
         f_dump_content_list,
         f_make_md_mode,
         server_url=None,
+        ocr_language_list=None,
         **kwargs,
 ):
     """异步处理VLM后端逻辑"""
@@ -436,16 +441,26 @@ async def _async_process_vlm(
         str(vlm_text_source or "").lower() in {"native_correction", "correction"}
         or os.getenv("MINERU_VLM_TEXT_SOURCE", "").lower() in {"native_correction", "correction"}
     )
+    use_ocr_native = (
+        str(vlm_text_source or "").lower() in {"ocr_native", "vlm_ocr_native"}
+        or os.getenv("MINERU_VLM_TEXT_SOURCE", "").lower() in {"ocr_native", "vlm_ocr_native"}
+    )
     use_fusion = (
         str(vlm_text_source or "").lower() == "fusion"
         or os.getenv("MINERU_VLM_TEXT_SOURCE", "").lower() == "fusion"
     )
-    parse_method = "vlm_native_correction" if use_native_correction else ("vlm_fusion" if use_fusion else "vlm")
+    parse_method = (
+        "vlm_ocr_native"
+        if use_ocr_native
+        else ("vlm_native_correction" if use_native_correction else ("vlm_fusion" if use_fusion else "vlm"))
+    )
     f_draw_span_bbox = False
     if not backend.endswith("client"):
         server_url = None
     analyze_func = aio_vlm_doc_analyze
-    if use_native_correction:
+    if use_ocr_native:
+        from mineru.backend.vlm_ocr_native.analyze import aio_doc_analyze as analyze_func
+    elif use_native_correction:
         from mineru.backend.vlm_native_correction.analyze import aio_doc_analyze as analyze_func
     elif use_fusion:
         from mineru.backend.vlm_fusion.analyze import aio_doc_analyze as analyze_func
@@ -454,9 +469,12 @@ async def _async_process_vlm(
         pdf_file_name = pdf_file_names[idx]
         local_image_dir, local_md_dir = prepare_env(output_dir, pdf_file_name, parse_method)
         image_writer, md_writer = FileBasedDataWriter(local_image_dir), FileBasedDataWriter(local_md_dir)
+        analyze_kwargs = dict(kwargs)
+        if use_ocr_native and ocr_language_list:
+            analyze_kwargs["ocr_language"] = ocr_language_list[min(idx, len(ocr_language_list) - 1)]
 
         middle_json, infer_result = await analyze_func(
-            pdf_bytes, image_writer=image_writer, backend=backend, server_url=server_url, **kwargs,
+            pdf_bytes, image_writer=image_writer, backend=backend, server_url=server_url, **analyze_kwargs,
         )
 
         pdf_info = middle_json["pdf_info"]
@@ -483,6 +501,7 @@ def _process_vlm(
         f_dump_content_list,
         f_make_md_mode,
         server_url=None,
+        ocr_language_list=None,
         **kwargs,
 ):
     """同步处理VLM后端逻辑"""
@@ -491,16 +510,26 @@ def _process_vlm(
         str(vlm_text_source or "").lower() in {"native_correction", "correction"}
         or os.getenv("MINERU_VLM_TEXT_SOURCE", "").lower() in {"native_correction", "correction"}
     )
+    use_ocr_native = (
+        str(vlm_text_source or "").lower() in {"ocr_native", "vlm_ocr_native"}
+        or os.getenv("MINERU_VLM_TEXT_SOURCE", "").lower() in {"ocr_native", "vlm_ocr_native"}
+    )
     use_fusion = (
         str(vlm_text_source or "").lower() == "fusion"
         or os.getenv("MINERU_VLM_TEXT_SOURCE", "").lower() == "fusion"
     )
-    parse_method = "vlm_native_correction" if use_native_correction else ("vlm_fusion" if use_fusion else "vlm")
+    parse_method = (
+        "vlm_ocr_native"
+        if use_ocr_native
+        else ("vlm_native_correction" if use_native_correction else ("vlm_fusion" if use_fusion else "vlm"))
+    )
     f_draw_span_bbox = False
     if not backend.endswith("client"):
         server_url = None
     analyze_func = vlm_doc_analyze
-    if use_native_correction:
+    if use_ocr_native:
+        from mineru.backend.vlm_ocr_native.analyze import doc_analyze as analyze_func
+    elif use_native_correction:
         from mineru.backend.vlm_native_correction.analyze import doc_analyze as analyze_func
     elif use_fusion:
         from mineru.backend.vlm_fusion.analyze import doc_analyze as analyze_func
@@ -509,9 +538,12 @@ def _process_vlm(
         pdf_file_name = pdf_file_names[idx]
         local_image_dir, local_md_dir = prepare_env(output_dir, pdf_file_name, parse_method)
         image_writer, md_writer = FileBasedDataWriter(local_image_dir), FileBasedDataWriter(local_md_dir)
+        analyze_kwargs = dict(kwargs)
+        if use_ocr_native and ocr_language_list:
+            analyze_kwargs["ocr_language"] = ocr_language_list[min(idx, len(ocr_language_list) - 1)]
 
         middle_json, infer_result = analyze_func(
-            pdf_bytes, image_writer=image_writer, backend=backend, server_url=server_url, **kwargs,
+            pdf_bytes, image_writer=image_writer, backend=backend, server_url=server_url, **analyze_kwargs,
         )
 
         pdf_info = middle_json["pdf_info"]
@@ -740,6 +772,9 @@ def do_parse(
         )
     else:
         vlm_text_source = kwargs.pop("vlm_text_source", None)
+        if backend.startswith("vlm-ocr-native-"):
+            vlm_text_source = "ocr_native"
+            backend = "vlm-" + backend[len("vlm-ocr-native-"):]
         if backend.startswith("vlm-native-correction-"):
             vlm_text_source = "native_correction"
             backend = "vlm-" + backend[len("vlm-native-correction-"):]
@@ -762,7 +797,7 @@ def do_parse(
                 output_dir, pdf_file_names, pdf_bytes_list, backend,
                 f_draw_layout_bbox, f_draw_span_bbox, f_dump_md, f_dump_middle_json,
                 f_dump_model_output, f_dump_orig_pdf, f_dump_content_list, f_make_md_mode,
-                server_url, image_analysis=image_analysis, vlm_text_source=vlm_text_source, **kwargs,
+                server_url, ocr_language_list=p_lang_list, image_analysis=image_analysis, vlm_text_source=vlm_text_source, **kwargs,
             )
         elif backend.startswith("hybrid-"):
             ensure_backend_dependencies(backend)
@@ -843,6 +878,9 @@ async def aio_do_parse(
         )
     else:
         vlm_text_source = kwargs.pop("vlm_text_source", None)
+        if backend.startswith("vlm-ocr-native-"):
+            vlm_text_source = "ocr_native"
+            backend = "vlm-" + backend[len("vlm-ocr-native-"):]
         if backend.startswith("vlm-native-correction-"):
             vlm_text_source = "native_correction"
             backend = "vlm-" + backend[len("vlm-native-correction-"):]
@@ -865,7 +903,7 @@ async def aio_do_parse(
                 output_dir, pdf_file_names, pdf_bytes_list, backend,
                 f_draw_layout_bbox, f_draw_span_bbox, f_dump_md, f_dump_middle_json,
                 f_dump_model_output, f_dump_orig_pdf, f_dump_content_list, f_make_md_mode,
-                server_url, image_analysis=image_analysis, vlm_text_source=vlm_text_source, **kwargs,
+                server_url, ocr_language_list=p_lang_list, image_analysis=image_analysis, vlm_text_source=vlm_text_source, **kwargs,
             )
         elif backend.startswith("hybrid-"):
             ensure_backend_dependencies(backend)

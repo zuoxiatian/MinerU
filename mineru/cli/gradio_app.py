@@ -225,6 +225,7 @@ STATUS_QUEUED_LOCALLY_PREFIX = "Queued locally:"
 
 BACKEND_CHOICE_DEFINITIONS = [
     "pipeline",
+    "vlm-ocr-native-auto-engine",
     "vlm-auto-engine",
     "vlm-native-correction-auto-engine",
     "vlm-fusion-auto-engine",
@@ -805,6 +806,10 @@ def resolve_parse_method(file_path, is_ocr, backend):
 def is_image_analysis_option_visible(backend):
     """判断 Gradio 图片分析开关是否应展示；pipeline 后端不消费该参数。"""
     return backend.startswith("vlm") or backend.startswith("hybrid")
+
+
+def is_ocr_options_visible(backend):
+    return (not backend.startswith("vlm")) or backend.startswith("vlm-ocr-native")
 
 
 def create_gradio_run_paths(file_path, output_root="./output"):
@@ -1500,6 +1505,7 @@ def main(ctx,
             "backend_label_hybrid": "Hybrid (Recommended)",
             "backend_label_pipeline": "Pipeline (Stable multilingual)",
             "backend_label_vlm": "VLM (High-precision Chinese/English)",
+            "backend_label_vlm_ocr_native": "VLM OCR Native (Experimental)",
             "backend_label_vlm_native_correction": "VLM Native Correction (Experimental)",
             "backend_label_vlm_fusion": "VLM Fusion (Experimental)",
             "backend_label_remote_vlm": "Remote VLM",
@@ -1549,6 +1555,7 @@ def main(ctx,
             "office_preview_ignore_once": "Dismiss",
             "office_preview_ignore_forever": "Always dismiss",
             "backend_info_vlm": "High-precision parsing via VLM, supports Chinese and English documents only.",
+            "backend_info_vlm_ocr_native": "Experimental VLM layout parsing: ordinary pages use VLM native correction, comic-like pages use OCR text regions.",
             "backend_info_vlm_native_correction": "Experimental VLM-primary parsing: keeps VLM layout and corrects bbox text with PDF native text.",
             "backend_info_vlm_fusion": "Experimental layout-first VLM fusion: preserves reliable PDF text and supplements visual text.",
             "backend_info_pipeline": "Traditional Multi-model pipeline parsing, supports multiple languages, hallucination-free.",
@@ -1571,6 +1578,7 @@ def main(ctx,
             "backend_label_hybrid": "Hybrid 推荐",
             "backend_label_pipeline": "Pipeline 稳定多语言",
             "backend_label_vlm": "VLM 高精度中英文",
+            "backend_label_vlm_ocr_native": "VLM OCR Native 实验版",
             "backend_label_vlm_fusion": "VLM Fusion 实验版",
             "backend_label_remote_vlm": "Remote VLM",
             "backend_label_remote_hybrid": "Remote Hybrid",
@@ -1619,6 +1627,7 @@ def main(ctx,
             "office_preview_ignore_once": "忽略",
             "office_preview_ignore_forever": "不再提示",
             "backend_info_vlm": "多模态大模型高精度解析，仅支持中英文文档。",
+            "backend_info_vlm_ocr_native": "实验版 VLM 布局解析：普通页走 VLM 原生文字校正，漫画页走 OCR 文字区域识别。",
             "backend_info_vlm_fusion": "实验版布局优先 VLM 融合：锁定可靠 PDF 原生文本，并补充视觉文字。",
             "backend_info_pipeline": "传统多模型管道解析，支持多语言，无幻觉。",
             "backend_info_hybrid": "高精度混合解析，支持多语言。",
@@ -1648,6 +1657,8 @@ def main(ctx,
             return ""
 
     def get_backend_info(backend_choice):
+        if backend_choice.startswith("vlm-ocr-native"):
+            return i18n("backend_info_vlm_ocr_native")
         if backend_choice.startswith("vlm-native-correction"):
             return "VLM 为主解析，保留 VLM 版式，并按 bbox 用 PDF 原生文本校正文字符。"
         if backend_choice.startswith("vlm-fusion"):
@@ -1670,10 +1681,7 @@ def main(ctx,
             client_options_update = gr.update(visible=True)
         else:
             client_options_update = gr.update(visible=False)
-        if "vlm" in backend_choice:
-            ocr_options_update = gr.update(visible=False)
-        else:
-            ocr_options_update = gr.update(visible=True)
+        ocr_options_update = gr.update(visible=is_ocr_options_visible(backend_choice))
 
         return client_options_update, ocr_options_update, formula_label_update, backend_info_update, image_analysis_update
 
@@ -1740,7 +1748,7 @@ def main(ctx,
                     file_types=suffixes,
                     elem_classes=["mineru-upload-file"],
                 )
-                preferred_option = "hybrid-auto-engine"
+                preferred_option = "vlm-ocr-native-auto-engine"
                 backend = gr.Dropdown(
                     build_backend_choices(http_client_enable, i18n),
                     label=i18n("backend"),
@@ -1844,7 +1852,7 @@ def main(ctx,
                         visible=is_image_analysis_option_visible(preferred_option),
                         info=i18n("image_analysis_info"),
                     )
-                with gr.Group() as ocr_options:
+                with gr.Group(visible=is_ocr_options_visible(preferred_option)) as ocr_options:
                     language = gr.Dropdown(
                         all_lang,
                         label=i18n("ocr_language"),
