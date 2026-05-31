@@ -30,6 +30,9 @@ TEXT_TYPES = {
 class PageClassifyResult:
     is_comic_like: bool
     largest_image_block_area_ratio: float
+    total_image_block_area_ratio: float
+    max_column_image_block_area_ratio: float
+    column_image_block_area_ratios: list[dict]
     image_block_count: int
     text_block_count: int
     reason: str
@@ -50,27 +53,51 @@ def classify_layout_blocks(
     page_width: int | float,
     page_height: int | float,
     large_image_ratio_threshold: float = 0.75,
+    total_image_ratio_threshold: float = 0.65,
+    column_image_ratio_threshold: float = 0.60,
 ) -> PageClassifyResult:
     image_block_count = 0
     text_block_count = 0
     largest_image_ratio = 0.0
+    total_image_ratio = 0.0
 
     for raw_block in layout_blocks or []:
         block = _block_to_dict(raw_block)
         block_type = str(block.get("type") or "").lower()
         if block_type in IMAGE_TYPES:
             image_block_count += 1
+            image_ratio = _bbox_area_ratio(block.get("bbox"), page_width, page_height)
+            total_image_ratio += image_ratio
             largest_image_ratio = max(
                 largest_image_ratio,
-                _bbox_area_ratio(block.get("bbox"), page_width, page_height),
+                image_ratio,
             )
         elif block_type in TEXT_TYPES:
             text_block_count += 1
+
+    total_image_ratio = min(1.0, total_image_ratio)
+    page_layout = analyze_layout_flow(
+        layout_blocks,
+        page_width=page_width,
+        page_height=page_height,
+    )
+    column_image_ratios = (
+        _column_image_area_ratios(layout_blocks, page_layout, page_width, page_height)
+        if page_layout.flow == "double_column"
+        else []
+    )
+    max_column_image_ratio = max(
+        [item["image_block_area_ratio"] for item in column_image_ratios],
+        default=0.0,
+    )
 
     if largest_image_ratio >= large_image_ratio_threshold:
         return PageClassifyResult(
             is_comic_like=True,
             largest_image_block_area_ratio=round(largest_image_ratio, 6),
+            total_image_block_area_ratio=round(total_image_ratio, 6),
+            max_column_image_block_area_ratio=round(max_column_image_ratio, 6),
+            column_image_block_area_ratios=column_image_ratios,
             image_block_count=image_block_count,
             text_block_count=text_block_count,
             reason="largest_image_block",
@@ -79,13 +106,41 @@ def classify_layout_blocks(
         return PageClassifyResult(
             is_comic_like=True,
             largest_image_block_area_ratio=round(largest_image_ratio, 6),
+            total_image_block_area_ratio=round(total_image_ratio, 6),
+            max_column_image_block_area_ratio=round(max_column_image_ratio, 6),
+            column_image_block_area_ratios=column_image_ratios,
             image_block_count=image_block_count,
             text_block_count=text_block_count,
             reason="image_block_count",
         )
+    if total_image_ratio >= total_image_ratio_threshold:
+        return PageClassifyResult(
+            is_comic_like=True,
+            largest_image_block_area_ratio=round(largest_image_ratio, 6),
+            total_image_block_area_ratio=round(total_image_ratio, 6),
+            max_column_image_block_area_ratio=round(max_column_image_ratio, 6),
+            column_image_block_area_ratios=column_image_ratios,
+            image_block_count=image_block_count,
+            text_block_count=text_block_count,
+            reason="total_image_block_area",
+        )
+    if max_column_image_ratio >= column_image_ratio_threshold:
+        return PageClassifyResult(
+            is_comic_like=True,
+            largest_image_block_area_ratio=round(largest_image_ratio, 6),
+            total_image_block_area_ratio=round(total_image_ratio, 6),
+            max_column_image_block_area_ratio=round(max_column_image_ratio, 6),
+            column_image_block_area_ratios=column_image_ratios,
+            image_block_count=image_block_count,
+            text_block_count=text_block_count,
+            reason="column_image_block_area",
+        )
     return PageClassifyResult(
         is_comic_like=False,
         largest_image_block_area_ratio=round(largest_image_ratio, 6),
+        total_image_block_area_ratio=round(total_image_ratio, 6),
+        max_column_image_block_area_ratio=round(max_column_image_ratio, 6),
+        column_image_block_area_ratios=column_image_ratios,
         image_block_count=image_block_count,
         text_block_count=text_block_count,
         reason="normal",
@@ -261,3 +316,46 @@ def _range_overlap_ratio(left: list[float], right: list[float]) -> float:
     overlap = max(0.0, min(left[1], right[1]) - max(left[0], right[0]))
     smaller = max(1.0, min(left[1] - left[0], right[1] - right[0]))
     return overlap / smaller
+
+
+def _column_image_area_ratios(
+    layout_blocks: list[Any],
+    page_layout: PageLayoutResult,
+    page_width: int | float,
+    page_height: int | float,
+) -> list[dict]:
+    ratios = []
+    image_blocks = []
+    for raw_block in layout_blocks or []:
+        block = _block_to_dict(raw_block)
+        block_type = str(block.get("type") or "").lower()
+        if block_type not in IMAGE_TYPES:
+            continue
+        bbox = _to_pdf_bbox(block.get("bbox"), page_width, page_height)
+        if bbox is None:
+            continue
+        image_blocks.append(
+            {
+                "bbox": bbox,
+                "center_x": (bbox[0] + bbox[2]) / 2,
+                "area": max(0.0, bbox[2] - bbox[0]) * max(0.0, bbox[3] - bbox[1]),
+            }
+        )
+
+    for column in page_layout.columns:
+        bbox = column.get("bbox") or [0, 0, 0, 0]
+        column_area = max(1.0, (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]))
+        image_area = 0.0
+        image_count = 0
+        for image_block in image_blocks:
+            if bbox[0] <= image_block["center_x"] <= bbox[2]:
+                image_area += image_block["area"]
+                image_count += 1
+        ratios.append(
+            {
+                "column_index": column.get("index"),
+                "image_block_count": image_count,
+                "image_block_area_ratio": round(min(1.0, image_area / column_area), 6),
+            }
+        )
+    return ratios
