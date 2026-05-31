@@ -53,6 +53,9 @@ from mineru.utils.pdfium_guard import (
 )
 
 
+TYPE_REGION_BLOCK_TYPES = {"header", "footer", "page_number"}
+
+
 def _close_images(images_list):
     for image_dict in images_list or []:
         pil_img = image_dict.get("img_pil")
@@ -252,6 +255,43 @@ def _extend_model_output(
         model_output.append(item)
 
 
+def _collect_vlm_type_regions(
+    layout_blocks,
+    page_width: int,
+    page_height: int,
+) -> list[dict]:
+    regions = []
+    for block in layout_blocks or []:
+        block_dict = dict(block)
+        block_type = str(block_dict.get("type") or "").lower()
+        if block_type not in TYPE_REGION_BLOCK_TYPES:
+            continue
+        bbox = block_dict.get("bbox")
+        if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+            continue
+        try:
+            x0, y0, x1, y1 = [float(value) for value in bbox]
+        except (TypeError, ValueError):
+            continue
+        if max(abs(x0), abs(y0), abs(x1), abs(y1)) <= 1.5:
+            pdf_bbox = [
+                x0 * page_width,
+                y0 * page_height,
+                x1 * page_width,
+                y1 * page_height,
+            ]
+        else:
+            pdf_bbox = [x0, y0, x1, y1]
+        regions.append(
+            {
+                "type": block_type,
+                "bbox": pdf_bbox,
+                "source": "vlm_layout",
+            }
+        )
+    return regions
+
+
 def _build_window_vlm_or_ocr_results(
     predictor,
     images_list,
@@ -288,6 +328,7 @@ def _build_window_vlm_or_ocr_results(
         page_layouts.append(page_layout)
         if classification.is_comic_like:
             page_modes[index] = "ocr"
+            type_regions = _collect_vlm_type_regions(layout_blocks, pdf_width, pdf_height)
             blocks, debug = extract_ocr_text_blocks(
                 page_image,
                 scale=scale,
@@ -295,6 +336,7 @@ def _build_window_vlm_or_ocr_results(
                 page_height=pdf_height,
                 language=ocr_language,
                 layout_hint=page_layout.__dict__,
+                type_regions=type_regions,
             )
             vlm_results[index] = blocks
             ocr_debug_list[index] = debug
@@ -352,6 +394,7 @@ async def _aio_build_window_vlm_or_ocr_results(
         page_layouts.append(page_layout)
         if classification.is_comic_like:
             page_modes[index] = "ocr"
+            type_regions = _collect_vlm_type_regions(layout_blocks, pdf_width, pdf_height)
             blocks, debug = await asyncio.to_thread(
                 extract_ocr_text_blocks,
                 page_image,
@@ -360,6 +403,7 @@ async def _aio_build_window_vlm_or_ocr_results(
                 page_height=pdf_height,
                 language=ocr_language,
                 layout_hint=page_layout.__dict__,
+                type_regions=type_regions,
             )
             vlm_results[index] = blocks
             ocr_debug_list[index] = debug

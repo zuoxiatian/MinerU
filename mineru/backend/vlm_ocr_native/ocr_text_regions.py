@@ -35,6 +35,7 @@ def extract_ocr_text_blocks(
     max_vertical_gap_px: float | None = None,
     min_x_overlap_ratio: float | None = None,
     layout_hint: dict | None = None,
+    type_regions: list[dict] | None = None,
 ) -> tuple[list[dict], dict]:
     records = detect_ocr_records(image, language=language)
     merged_records = merge_adjacent_records(
@@ -53,15 +54,17 @@ def extract_ocr_text_blocks(
         if not content.strip():
             continue
         pdf_bbox = [value / max(scale, 1e-6) for value in merged["bbox"]]
+        block_type, matched_region = _classify_block_type_by_regions(pdf_bbox, type_regions)
         blocks.append(
             {
-                "type": "text",
+                "type": block_type,
                 "bbox": pdf_to_unit_bbox(pdf_bbox, page_width, page_height),
                 "angle": 0,
                 "content": content,
                 "index": len(blocks) + 1,
                 "source": "ocr",
                 "_ocr_children": merged["children"],
+                "_ocr_type_region": matched_region,
             }
         )
 
@@ -71,6 +74,7 @@ def extract_ocr_text_blocks(
         "raw_regions": records,
         "merged_regions": merged_records,
         "layout_hint": layout_hint or {},
+        "type_regions": type_regions or [],
     }
     return blocks, debug
 
@@ -272,6 +276,36 @@ def _sort_merged_records_by_layout_hint(
         }
         for index, record in enumerate(sorted_records, start=1)
     ]
+
+
+def _classify_block_type_by_regions(
+    pdf_bbox: list[float],
+    type_regions: list[dict] | None,
+) -> tuple[str, dict | None]:
+    if not type_regions:
+        return "text", None
+    center_x = (pdf_bbox[0] + pdf_bbox[2]) / 2
+    center_y = (pdf_bbox[1] + pdf_bbox[3]) / 2
+    best_region = None
+    best_area = None
+    for region in type_regions:
+        bbox = region.get("bbox") if isinstance(region, dict) else None
+        if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+            continue
+        if not (float(bbox[0]) <= center_x <= float(bbox[2]) and float(bbox[1]) <= center_y <= float(bbox[3])):
+            continue
+        area = max(0.0, float(bbox[2]) - float(bbox[0])) * max(0.0, float(bbox[3]) - float(bbox[1]))
+        if best_area is None or area < best_area:
+            best_region = region
+            best_area = area
+    if best_region is None:
+        return "text", None
+    block_type = str(best_region.get("type") or "text")
+    return block_type, {
+        "type": block_type,
+        "bbox": [round(float(value), 3) for value in best_region.get("bbox", [])],
+        "source": "vlm_layout",
+    }
 
 
 def _join_child_text(children: list[dict]) -> str:
