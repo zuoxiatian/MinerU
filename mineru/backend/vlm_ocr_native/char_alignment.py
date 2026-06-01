@@ -513,7 +513,9 @@ def _substitute_cost(native: CharToken, vlm: CharToken) -> float:
     if native.normalized == vlm.normalized:
         return 0.05
     if not native.effective and not vlm.effective:
-        return 0.2
+        return 0.0
+    if native.effective != vlm.effective:
+        return 4.0
     if native.char_type == DIGIT or vlm.char_type == DIGIT:
         return 3.0
     if native.char_type in {MATH_SYMBOL, CURRENCY_SYMBOL} or vlm.char_type in {MATH_SYMBOL, CURRENCY_SYMBOL}:
@@ -524,7 +526,7 @@ def _substitute_cost(native: CharToken, vlm: CharToken) -> float:
 def _insert_cost(token: CharToken) -> float:
     """插入成本：VLM 有而 native 没有，表示 native 疑似漏字。"""
     if not token.effective:
-        return 0.45
+        return 0.0
     if token.char_type == DIGIT:
         return 1.8
     if token.char_type in {MATH_SYMBOL, CURRENCY_SYMBOL}:
@@ -535,7 +537,7 @@ def _insert_cost(token: CharToken) -> float:
 def _delete_cost(token: CharToken) -> float:
     """删除成本：native 有而 VLM 没有，表示 VLM 漏识别或 native 多出字符。"""
     if not token.effective:
-        return 0.35
+        return 0.0
     if token.char_type == DIGIT:
         return 1.8
     if token.char_type in {MATH_SYMBOL, CURRENCY_SYMBOL}:
