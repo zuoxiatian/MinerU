@@ -25,11 +25,6 @@ from mineru.backend.vlm_ocr_native.vlm_runner import (
 )
 from mineru.backend.vlm_ocr_native.config import get_correction_config
 from mineru.backend.vlm_ocr_native.correction import correct_page
-from mineru.backend.vlm_ocr_native.gap_recognizer import (
-    aio_recognize_native_correction_gaps,
-    detect_native_correction_gaps,
-    recognize_native_correction_gaps,
-)
 from mineru.backend.vlm_ocr_native.middle_json import (
     append_page_correction_to_middle_json,
     finalize_middle_json,
@@ -88,15 +83,13 @@ def _correct_window_pages(
     layout_results,
     vlm_results,
     native_spans_list,
-    native_gaps_list=None,
 ):
     config = get_correction_config()
-    native_gaps_list = native_gaps_list or [[] for _ in native_spans_list]
     corrected_blocks_list = []
     metrics_list = []
     compare_records_list = []
-    for offset, (layout_blocks, vlm_blocks, native_spans, native_gaps) in enumerate(
-        zip(layout_results, vlm_results, native_spans_list, native_gaps_list)
+    for offset, (layout_blocks, vlm_blocks, native_spans) in enumerate(
+        zip(layout_results, vlm_results, native_spans_list)
     ):
         page_index = window_start + offset
         width, height = _page_size(pdf_doc, page_index)
@@ -115,95 +108,12 @@ def _correct_window_pages(
             vlm_blocks=vlm_block_dicts,
             native_spans=native_spans,
             visual_candidates=collect_visual_text_candidates(vlm_block_dicts, width, height),
-            native_gaps=native_gaps,
         )
         corrected_blocks, metrics, compare_records = correct_page(context, config)
         corrected_blocks_list.append(corrected_blocks)
         metrics_list.append(metrics)
         compare_records_list.append(compare_records)
     return corrected_blocks_list, metrics_list, compare_records_list
-
-
-def _native_gap_to_dict(gap):
-    return {
-        "bbox": [round(value, 3) for value in gap.bbox],
-        "block_index": gap.block_index,
-        "left_span_uid": gap.left_span_uid,
-        "right_span_uid": gap.right_span_uid,
-        "max_chars": gap.max_chars,
-        "content": gap.content,
-        "source": gap.source,
-    }
-
-
-def _recognize_window_native_gaps(
-    predictor,
-    images_list,
-    vlm_results,
-    native_spans_list,
-    page_modes=None,
-):
-    config = get_correction_config()
-    page_modes = page_modes or ["vlm"] * len(vlm_results)
-    native_gaps_list = []
-    for image_dict, vlm_blocks, native_spans, page_mode in zip(images_list, vlm_results, native_spans_list, page_modes):
-        if page_mode == "ocr":
-            native_gaps_list.append([])
-            continue
-        page_image = image_dict["img_pil"]
-        width, height = page_image.size
-        scale = image_dict["scale"]
-        pdf_width = int(width / scale)
-        pdf_height = int(height / scale)
-        vlm_block_dicts = [dict(block) for block in vlm_blocks]
-        for block_index, block in enumerate(vlm_block_dicts):
-            block.setdefault("index", block_index + 1)
-        gaps = detect_native_correction_gaps(
-            vlm_block_dicts,
-            native_spans,
-            pdf_width,
-            pdf_height,
-            config,
-        )
-        native_gaps_list.append(
-            recognize_native_correction_gaps(predictor, page_image, scale, gaps, config)
-        )
-    return native_gaps_list
-
-
-async def _aio_recognize_window_native_gaps(
-    predictor,
-    images_list,
-    vlm_results,
-    native_spans_list,
-    page_modes=None,
-):
-    config = get_correction_config()
-    page_modes = page_modes or ["vlm"] * len(vlm_results)
-    native_gaps_list = []
-    for image_dict, vlm_blocks, native_spans, page_mode in zip(images_list, vlm_results, native_spans_list, page_modes):
-        if page_mode == "ocr":
-            native_gaps_list.append([])
-            continue
-        page_image = image_dict["img_pil"]
-        width, height = page_image.size
-        scale = image_dict["scale"]
-        pdf_width = int(width / scale)
-        pdf_height = int(height / scale)
-        vlm_block_dicts = [dict(block) for block in vlm_blocks]
-        for block_index, block in enumerate(vlm_block_dicts):
-            block.setdefault("index", block_index + 1)
-        gaps = detect_native_correction_gaps(
-            vlm_block_dicts,
-            native_spans,
-            pdf_width,
-            pdf_height,
-            config,
-        )
-        native_gaps_list.append(
-            await aio_recognize_native_correction_gaps(predictor, page_image, scale, gaps, config)
-        )
-    return native_gaps_list
 
 
 def _extend_model_output(
@@ -213,23 +123,20 @@ def _extend_model_output(
     corrected_blocks_list,
     compare_records_list,
     metrics_list,
-    native_gaps_list=None,
     page_classifications=None,
     page_modes=None,
     ocr_debug_list=None,
     page_layouts=None,
 ):
-    native_gaps_list = native_gaps_list or [[] for _ in corrected_blocks_list]
     page_classifications = page_classifications or [None] * len(corrected_blocks_list)
     page_modes = page_modes or ["vlm"] * len(corrected_blocks_list)
     ocr_debug_list = ocr_debug_list or [None] * len(corrected_blocks_list)
     page_layouts = page_layouts or [None] * len(corrected_blocks_list)
-    for layout, vlm, corrected, compare_records, native_gaps, metrics, classification, page_mode, ocr_debug, page_layout in zip(
+    for layout, vlm, corrected, compare_records, metrics, classification, page_mode, ocr_debug, page_layout in zip(
         layout_results,
         vlm_results,
         corrected_blocks_list,
         compare_records_list,
-        native_gaps_list,
         metrics_list,
         page_classifications,
         page_modes,
@@ -242,7 +149,6 @@ def _extend_model_output(
             "vlm": [dict(block) for block in vlm],
             "corrected": corrected,
             "bbox_text_compare": compare_records,
-            "native_gaps": [_native_gap_to_dict(gap) for gap in native_gaps],
             "metrics": metrics.to_dict(),
         }
         item["page_mode"] = page_mode
@@ -488,21 +394,12 @@ def doc_analyze(
                         window_start,
                         len(images_pil_list),
                     )
-                    with predictor_execution_guard(predictor):
-                        native_gaps_list = _recognize_window_native_gaps(
-                            predictor,
-                            images_list,
-                            vlm_results,
-                            native_spans_list,
-                            page_modes,
-                        )
                     corrected_blocks_list, metrics_list, compare_records_list = _correct_window_pages(
                         pdf_doc,
                         window_start,
                         layout_results,
                         vlm_results,
                         native_spans_list,
-                        native_gaps_list,
                     )
                     _extend_model_output(
                         model_output,
@@ -511,7 +408,6 @@ def doc_analyze(
                         corrected_blocks_list,
                         compare_records_list,
                         metrics_list,
-                        native_gaps_list,
                         page_classifications,
                         page_modes,
                         ocr_debug_list,
@@ -613,13 +509,6 @@ async def aio_doc_analyze(
                         window_start,
                         len(images_pil_list),
                     )
-                    native_gaps_list = await _aio_recognize_window_native_gaps(
-                        predictor,
-                        images_list,
-                        vlm_results,
-                        native_spans_list,
-                        page_modes,
-                    )
                     corrected_blocks_list, metrics_list, compare_records_list = await asyncio.to_thread(
                         _correct_window_pages,
                         pdf_doc,
@@ -627,7 +516,6 @@ async def aio_doc_analyze(
                         layout_results,
                         vlm_results,
                         native_spans_list,
-                        native_gaps_list,
                     )
                     _extend_model_output(
                         model_output,
@@ -636,7 +524,6 @@ async def aio_doc_analyze(
                         corrected_blocks_list,
                         compare_records_list,
                         metrics_list,
-                        native_gaps_list,
                         page_classifications,
                         page_modes,
                         ocr_debug_list,

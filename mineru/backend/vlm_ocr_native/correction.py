@@ -24,7 +24,7 @@ from mineru.backend.vlm_ocr_native.char_alignment import (
     align_native_with_vlm,
     effective_token_count,
 )
-from mineru.backend.vlm_ocr_native.native_text import build_native_match, join_native_spans_with_gaps
+from mineru.backend.vlm_ocr_native.native_text import build_native_match
 from mineru.backend.vlm_ocr_native.config import NativeCorrectionConfig
 from mineru.backend.vlm_ocr_native.schemas import CorrectionMetrics, PageCorrectionContext
 
@@ -52,14 +52,7 @@ def correct_page(
         block_type = block.get("type", "text")
         block_bbox = block_pdf_bbox(block, context.page_width, context.page_height)
         native_match = build_native_match(block_bbox, context.native_spans, overlap_threshold=0.45)
-        block_gaps = [
-            gap for gap in context.native_gaps if gap.block_index == block.get("index", index + 1) and gap.content.strip()
-        ]
-        native_text = (
-            join_native_spans_with_gaps(native_match.spans, block_gaps)
-            if block_gaps
-            else native_match.content
-        )
+        native_text = native_match.content
         vlm_text = block.get("content") or ""
         correctable = _is_correctable_text_block(block_type, block)
 
@@ -87,10 +80,6 @@ def correct_page(
             if result["decision"] in {"keep_vlm_conflict", "keep_vlm_order_conflict"}:
                 metrics.skipped_conflict_count += 1
             debug = result if config.debug else None
-        metrics.native_gap_count += len(
-            [gap for gap in context.native_gaps if gap.block_index == block.get("index", index + 1)]
-        )
-        metrics.native_gap_filled_count += sum(1 for gap in block_gaps if gap.content.strip())
 
         if correctable:
             corrected = copy_model_block(block)

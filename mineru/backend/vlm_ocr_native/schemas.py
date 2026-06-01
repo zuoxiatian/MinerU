@@ -37,18 +37,6 @@ class VisualTextCandidate:
 
 
 @dataclass
-class NativeGap:
-    """Suspicious gap between adjacent PDF native spans."""
-    bbox: BBox
-    block_index: int
-    left_span_uid: int
-    right_span_uid: int
-    max_chars: int = 0
-    content: str = ""
-    source: str = "vlm_gap"
-
-
-@dataclass
 class PageCorrectionContext:
     page_index: int
     page_width: int
@@ -57,7 +45,6 @@ class PageCorrectionContext:
     vlm_blocks: list[dict]
     native_spans: list[NativeSpan]
     visual_candidates: list[VisualTextCandidate] = field(default_factory=list)
-    native_gaps: list[NativeGap] = field(default_factory=list)
 
 
 @dataclass
@@ -68,8 +55,6 @@ class CorrectionMetrics:
     corrected_block_count: int = 0
     corrected_char_count: int = 0
     native_inserted_char_count: int = 0
-    native_gap_count: int = 0
-    native_gap_filled_count: int = 0
     skipped_conflict_count: int = 0
     vlm_fallback_count: int = 0
 
@@ -81,8 +66,6 @@ class CorrectionMetrics:
             "corrected_block_count": self.corrected_block_count,
             "corrected_char_count": self.corrected_char_count,
             "native_inserted_char_count": self.native_inserted_char_count,
-            "native_gap_count": self.native_gap_count,
-            "native_gap_filled_count": self.native_gap_filled_count,
             "skipped_conflict_count": self.skipped_conflict_count,
             "vlm_fallback_count": self.vlm_fallback_count,
         }

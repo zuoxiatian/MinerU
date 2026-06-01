@@ -27,7 +27,6 @@
 VLM layout
   -> batch_content_extract_from_layouts
   -> native text extraction
-  -> native gap recognition
   -> correct_page
   -> middle_json
 ```

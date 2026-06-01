@@ -69,12 +69,10 @@ class CharAlignConfig:
 
     - native_missing_max_run: 允许连续从 VLM 补入的有效字符数。默认 2，表示只补小缺口。
     - native_missing_max_total_ratio: 单个 bbox 内补入字符占 native 有效字符数的最大比例。
-    - missing_without_gap_max_run: 预留参数；后续区分“有 gap bbox/无 gap bbox”补字时使用。
     - max_conflict_ratio: native 与 VLM 有效字符冲突比例上限，超过则不补字、不替换。
     """
     native_missing_max_run: int = 2
     native_missing_max_total_ratio: float = 0.05
-    missing_without_gap_max_run: int = 1
     max_conflict_ratio: float = 0.25
 
 
